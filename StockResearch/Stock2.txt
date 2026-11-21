@@ -1,0 +1,365 @@
+================================================================================
+SECTION 4. FREE DATA FEASIBILITY AND ARCHITECTURE
+================================================================================
+
+4.1 SOURCE TABLE (need -> source -> delay -> limits -> reliability)
+  Options chain, OI, IV, greeks, volume
+    CBOE delayed JSON (cdn.cboe.com/api/global/delayed_quotes/options/{T}.json)
+    ~15 min delayed; OI static daily; no key; limits unpublished; UNDOCUMENTED, medium
+    risk. Fallbacks: Alpaca indicative options (200 req/min, free key), Yahoo options.
+  Daily OHLCV, spot, splits/dividends
+    Yahoo via yfinance (no key, 429s, personal use) as primary; Alpaca (key, 200/min,
+    IEX real-time, SIP 15-min delayed over REST, ~2016+ history) as second source;
+    Stooq (API key via CAPTCHA, daily quota) as third. Cache everything to disk.
+  Intraday bars (volume profile, true VWAP)
+    Alpaca free (IEX volume is only a slice of consolidated volume, so profile and VWAP
+    are approximations, label them). Yahoo 1m is ~7 days, 5m ~60 days. [K][?]
+  Fundamentals, filings, insiders
+    SEC EDGAR data.sec.gov: companyfacts, submissions, frames. No key. 10 requests/sec,
+    must declare a descriptive User-Agent. APIs updated in near real time (XBRL <1 min);
+    bulk zips rebuilt nightly ~3am ET. Form 4 via submissions + parse XML. [V S10]
+    Convenience fundamentals (forward P/E, margins, analyst data): yfinance (unofficial).
+  Analyst consensus, targets, revisions, earnings dates/surprises
+    yfinance (analyst price targets, recommendations, upgrades/downgrades, earnings
+    dates, EPS history). Finnhub free tier 60 calls/min with a free key; free coverage
+    of price target vs premium is inconsistent in the docs I found, test it. [V S34][?]
+  Short interest
+    FINRA equity short interest, twice monthly, ~7th business day after settlement.
+    Free for non-commercial use. [V S11]
+  Short sale volume
+    FINRA daily Reg SHO files by ~6pm ET, off-exchange only. [V S11]
+  Off-exchange/ATS volume
+    FINRA OTC transparency, weekly, 2-week lag (Tier 1) or 4-week lag. No side. [V S11]
+  Macro, rates, VIX family
+    FRED (free key): VIXCLS, VXVCLS (VIX3M), DGS3MO, DGS10, T10Y2Y, DTWEXBGS. HY OAS now
+    3y only; S&P 500 10y only. [V S12] Cboe publishes VIX-family histories as CSV on its
+    site (VIX9D, VIX, VIX3M, VIX6M) [V S39]; exact CSV URL pattern unverified [?].
+  Market-wide put/call
+    Cboe daily market statistics page (?dt=YYYY-MM-DD) gives total/index/equity/ETP/VIX
+    put/call. Old CSVs end 2019-10-04. Archive daily. [V S2,S3]
+  Breadth
+    No free official feed. Compute % above 50/200 DMA, A/D line, new highs/lows from
+    the S&P 500 constituent list (Wikipedia/index CSV) using daily bars. 500 symbols is
+    heavy for Yahoo; use Alpaca multi-symbol bar requests, cache, and update nightly. [K]
+    Cheap proxy: RSP/SPY ratio (equal-weight vs cap-weight).
+  Credit spread
+    FRED HY OAS (3y only) plus self-archive; or HYG/IEF and LQD/IEF price ratios which
+    have full ETF history. [V S12][K]
+  Sentiment
+    News tone: Loughran-McDonald dictionary (free download from Notre Dame SRAF) on
+    headlines you fetch (Yahoo/Finnhub news). Reddit/StockTwits: unreliable access. [K][V S37]
+  Borrow
+    IBKR public stock-loan file (fee rate, shares available), one broker. [V S36]
+
+4.2 IS THE NIGHTLY SELF-ARCHIVING JOB THE MVP? YES.
+  Cannot be backfilled for free: IV rank/percentile (needs 252d of your ticker's ATM IV),
+  OI change, GEX/flip/wall history (for percentiles of GEX itself), put/call history
+  beyond 2019, HY OAS beyond 3 years, FINRA ATS and borrow history as originally
+  published, analyst-consensus-as-of history (for revisions).
+  WHAT TO ARCHIVE DAILY (two runs)
+    Run A, ~16:30 ET (after close): raw chain per watched ticker (all contracts: symbol,
+      bid, ask, last, iv, delta, gamma, theta, vega, volume, OI, timestamp), underlying
+      quote, CBOE iv30 field if present [?], daily OHLCV, SPY/QQQ/sector ETFs, VIX,
+      VIX3M, VVIX if available, Cboe daily put/call page, HYG/IEF/LQD, FRED series.
+    Run B, ~08:30 ET (pre-open): fresh OI for the watched tickers (OI as of prior close).
+      Day-over-day OI change = difference of consecutive Run B snapshots; compare with the
+      prior day's Run A volume to infer opening vs closing activity (inference only).
+    Weekly/biweekly: FINRA short interest as published, FINRA ATS weekly, IBKR borrow file,
+      analyst consensus snapshot, earnings calendar, S&P 500 constituents.
+  Storage: DuckDB or SQLite + Parquet partitioned by date/ticker. Keep raw JSON gzip too
+  (schema drift insurance). A chain is roughly hundreds of KB gzipped; 20 tickers x 250
+  days is on the order of 1-2 GB/year raw. Run it with cron/launchd/Task Scheduler on an
+  always-on box, or GitHub Actions cron (watch public-repo privacy). [K]
+  Start with IV rank history immediately; show "n days of history" and hide IVR until n>=60,
+  fully trusted at 252.
+
+4.3 ARCHITECTURE
+  Python 3.11+. Layers: adapters (one per source, each returns typed frames with an
+  as_of timestamp and source name) -> cache/store -> pure compute functions (no I/O) ->
+  view-models -> UI. Failures degrade per-tile ("source unavailable, last good as of ...")
+  and never crash the page. Streamlit or Dash + Plotly for MVP; TradingView's open-source
+  lightweight-charts for price panels is optional. [K] Unit tests with golden fixtures for
+  every formula (BS gamma, GEX, flip, RSI, ATR, IV rank).
+
+================================================================================
+SECTION 5. INDICATOR CATALOG
+================================================================================
+Entry format: DEF / FORMULA / READS / NOT PROVEN / TYPE + LOOKBACK / FREE SOURCE.
+TYPE: L = leading-ish (conditional on information not yet in price), C = coincident,
+G = lagging. All "percentile" = percentile within the stock's OWN trailing history.
+
+-------------------------------- A. OPTIONS / DEALER ---------------------------
+
+A1 NET GEX
+ DEF: modeled dollar hedging sensitivity of dealers per 1% move.
+ FORMULA: sum_i sign_i * G_i * OI_i * 100 * S^2 * 0.01, sign per convention A (calls +, puts -).
+ READS: large + : damped, mean-reverting; large - : amplified, momentum; near 0 : unanchored.
+ NOT PROVEN: direction; independent predictive power beyond VIX/ATM IV. [V S21]
+ TYPE: C/regime context. LOOKBACK: today vs own 252d percentile; recompute daily.
+ FREE: CBOE chain (OI, IV, spot) + your BS.
+
+A2 GEX BY STRIKE
+ DEF: per-strike gamma exposure. FORMULA: A1 per strike, calls and puts shown separately.
+ READS: clusters = strikes where hedging flow concentrates; potential pins and air pockets.
+ NOT PROVEN: that price respects these strikes. TYPE: C. LOOKBACK: today, split by DTE bucket.
+ FREE: CBOE chain.
+
+A3 GAMMA FLIP (zero gamma)
+ DEF: spot level where net GEX changes sign. FORMULA: Section 3.8 (re-price at hypothetical spots).
+ READS: above = typically more damping, below = more amplification, if the sign assumption holds.
+ NOT PROVEN: a price magnet or reliable support/resistance; flips under assumption changes.
+ TYPE: C. LOOKBACK: daily. FREE: CBOE chain + BS.
+
+A4 CALL WALL / A5 PUT WALL
+ DEF: strike with the largest call GEX (or call OI) above spot / largest put GEX (or OI) below.
+ FORMULA: argmax over strikes of call_GEX; argmax of |put_GEX|. Report both GEX-wall and OI-wall.
+ READS: candidate levels where dealer hedging may resist/support, and where large OI sits.
+ NOT PROVEN: that price stops there; walls near expiry vanish. TYPE: C. LOOKBACK: daily, by DTE.
+ FREE: CBOE chain.
+
+A6 DEX (delta exposure)
+ DEF: net delta of modeled dealer book. FORMULA: sum sign_i * delta_i * OI_i * 100 * S.
+ READS: inventory proxy. NOT PROVEN: direction; vendors disagree on sign; showed no next-day
+ return signal. [V S21] TYPE: C. LOOKBACK: daily. FREE: CBOE chain. Display-only.
+
+A7 VANNA / VEX
+ DEF: change in delta per change in vol. FORMULA: vanna = -exp(-qT) phi(d1) d2 / sigma;
+ VEX = sum sign_i * vanna_i * OI_i * 100 * S * 0.01.
+ READS: if IV falls, positive-vanna books shed delta hedges (supportive flow in theory).
+ NOT PROVEN: mostly a VIX/IV proxy, no residual power after controls. [V S21] Display-only.
+
+A8 CHARM / CHEX
+ DEF: change in delta with time (delta decay). FORMULA (call, textbook form):
+ charm = q exp(-qT) N(d1) - exp(-qT) phi(d1) [2(r-q)T - d2 sigma sqrt(T)] / (2 T sigma sqrt(T)).
+ READS: flows into expiry and weekends as deltas drift. NOT PROVEN: fragile in residualized
+ EOD tests; intraday claims untested here. [V S21] Display-only, label "theoretical flow".
+
+A9 MAX PAIN
+ DEF: expiry settlement price minimizing total intrinsic payout to option holders.
+ FORMULA: for each candidate K*, sum over calls max(K*-K,0)*OI_c + puts max(K-K*,0)*OI_p; take argmin.
+ READS: informational only. NOT PROVEN: price magnet (Myth 2). TYPE: C. LOOKBACK: per expiry.
+ FREE: CBOE chain. Put behind a toggle, off by default.
+
+A10 PUT/CALL RATIO (single stock): by volume and by OI
+ FORMULA: put_vol/call_vol; put_OI/call_OI. READS: positioning/hedging demand relative to
+ own history (percentile). NOT PROVEN: bearishness at any fixed level (hedging, dividends
+ capture, spreads distort). TYPE: C/L weak. LOOKBACK: 60-252d percentile. FREE: chain
+ (history needs archive).
+
+A11 UNUSUAL OPTIONS ACTIVITY
+ FORMULA: volume / OI by contract (e.g. >3x with volume above a floor), premium = volume*mid*100.
+ READS: unusual interest. NOT PROVEN: buyer vs seller, opening vs closing, informed vs hedge.
+ Only next-day OI change (needs archive) hints at opens. [V S38] FREE: chain + archive.
+
+A12 IMPLIED VOLATILITY (ATM, per expiry)
+ FORMULA: average of the two nearest-the-money strikes' IV, interpolated to constant maturity (30d).
+ READS: market price of future movement; direction-blind. LOOKBACK: percentile. FREE: chain.
+
+A13 IV RANK / A14 IV PERCENTILE
+ FORMULA: IVR = (IV - min252)/(max252 - min252); IVP = share of last 252 days with IV < today.
+ READS: how rich IV is vs own year (IVR is hurt by one spike; IVP more robust). NOT PROVEN: that
+ options are "cheap/expensive" for a given trade. FREE: ONLY via your nightly archive.
+
+A15 IV TERM STRUCTURE
+ FORMULA: ATM IV at each expiry (also forward vol between expiries). READS: contango normal;
+ inversion = event or stress premium in front months. Use to isolate earnings: event vol =
+ sqrt( (T2*s2^2 - T1*s1^2)/(T2-T1) ) style forward calculation. FREE: chain.
+
+A16 SKEW / 25-DELTA RISK REVERSAL
+ FORMULA: RR25 = IV(25-delta call) - IV(25-delta put) at fixed expiry; interpolate by the
+ chain's delta. READS: negative = downside protection costs more. NOT PROVEN: crash timing. FREE: chain.
+
+A17 EXPECTED MOVE
+ FORMULA: 1-sd move = S * IV * sqrt(DTE/365). ATM straddle price ~ expected ABSOLUTE move
+ ~ 0.8 * 1-sd, so 1-sd ~ 1.25 * straddle. Show both. READS: market-implied range, not a
+ forecast; on average implied exceeds realized (VRP), so realized stays inside more often
+ than the 68% label suggests. Earnings inflate near expiries. FREE: chain.
+
+A18 0DTE CONCENTRATION
+ FORMULA: gamma (and OI, and volume) in the nearest expiry / total. READS: how fragile today's
+ levels are. NOT PROVEN: dealer net 0DTE gamma is small per Cboe. [V S18] FREE: chain.
+
+A19 OI BY STRIKE AND CHANGE IN OI
+ FORMULA: OI_t - OI_{t-1} per contract. READS: where positions accumulated. FREE: archive Run B.
+
+A20 BID/ASK SPREAD % (quality filter)
+ FORMULA: (ask-bid)/mid. READS: drop contracts with wide spreads or zero bid from IV, skew,
+ expected move, and GEX weights; show a "chain quality" score. FREE: chain.
+
+-------------------------------- B. PRICE / TECHNICAL ---------------------------
+
+B1 SMA/EMA 20/50/200 and price vs MA
+ FORMULA: SMA_n = mean(close_n); EMA alpha = 2/(n+1). READS: trend regime, distance
+ from MA in % and in ATR. NOT PROVEN: continuation. TYPE: G. FREE: OHLCV.
+
+B2 GOLDEN / DEATH CROSS
+ FORMULA: SMA50 crosses SMA200. READS: lagging regime label; NOT a timing signal (Myth 5). TYPE: G.
+
+B3 RSI(14)
+ FORMULA: RSI = 100 - 100/(1+RS), RS = Wilder-smoothed avg gain / avg loss.
+ RSI 70 means average gains are ~2.33x average losses (math). READS: momentum persistence in
+ trends; mean-reversion only in ranges. NOT PROVEN: reversal at 70/30 (Myth 4). TYPE: C/G.
+
+B4 MACD (12,26,9)
+ FORMULA: EMA12 - EMA26; signal = EMA9 of that; histogram = diff. READS: momentum shift.
+ NOT PROVEN: timing; it is a smoothed price difference (redundant with B1). TYPE: G.
+
+B5 STOCHASTIC (14,3,3)
+ FORMULA: %K = 100*(C - LL14)/(HH14 - LL14), smooth 3, %D = SMA3. READS: position within the
+ recent range. NOT PROVEN: reversals. TYPE: C. Redundant with RSI.
+
+B6 ADX(14) with +DI/-DI
+ FORMULA: Wilder smoothing of directional movement; ADX = smoothed |+DI - -DI|/(+DI + -DI).
+ READS: trend STRENGTH, direction-free (>25 trending, <20 range, rules of thumb). TYPE: G.
+
+B7 ROC(n) FORMULA: close/close_{n} - 1. READS: raw momentum; use 12-1 month for context. TYPE: G.
+
+B8 ATR / ATR%
+ FORMULA: TR = max(H-L, |H-prevC|, |L-prevC|); ATR14 = Wilder mean; ATR% = ATR/close.
+ READS: typical daily range; sizing context; compare gaps to ATR. TYPE: C.
+
+B9 BOLLINGER BANDS / BANDWIDTH
+ FORMULA: mid = SMA20; bands = mid +/- 2 sd; bandwidth = (U-L)/mid; %B = (C-L)/(U-L).
+ READS: squeeze = low realized vol (percentile of bandwidth). NOT PROVEN: direction of breakout.
+
+B10 HISTORICAL VOLATILITY vs IMPLIED
+ FORMULA: HV_n = stdev(ln(C_t/C_{t-1}), n) * sqrt(252); show HV10/20/60 vs IV30.
+ READS: IV-HV spread (VRP-like). NOT PROVEN: that selling or buying vol will pay. TYPE: C.
+
+B11 BETA
+ FORMULA: cov(r_stock, r_SPY)/var(r_SPY) on 1y weekly or 2y daily; also vs sector ETF.
+ READS: sensitivity to market. NOT PROVEN: stable in stress. TYPE: G.
+
+B12 OBV
+ FORMULA: cumulative +V on up days, -V on down days. READS: volume vs price agreement. Low
+ reliability; derived from OHLCV. TYPE: C.
+
+B13 VWAP
+ FORMULA: sum(price*volume)/sum(volume) from session open. TRUE intraday VWAP needs intraday
+ bars; daily bars cannot give it (daily "VWAP" proxy = typical price is a different thing).
+ With free IEX bars it is an approximation. Anchored VWAP from an event date is a clean use. TYPE: C.
+
+B14 VOLUME PROFILE / POC / VALUE AREA
+ FORMULA: histogram of volume by price bin over a window; POC = max bin; value area = bins
+ holding 70% of volume around POC (VAH/VAL). READS: acceptance zones, high-volume nodes.
+ FREE: intraday bars (Alpaca IEX, a partial-volume approximation); daily-bar version spreads
+ each day's volume over its H-L range (crude, label it).
+
+B15 RELATIVE VOLUME (RVOL)
+ FORMULA: today's volume / average volume at same time (or 20d average). READS: participation.
+
+B16 ACCUMULATION/DISTRIBUTION and B17 CHAIKIN MONEY FLOW
+ FORMULA: CLV = ((C-L)-(H-C))/(H-L); A/D = cumulative CLV*V; CMF20 = sum(CLV*V,20)/sum(V,20).
+ READS: where closes land in the range, volume weighted. NOT PROVEN: institutional buying.
+
+B18 UP/DOWN VOLUME RATIO
+ FORMULA: sum volume on up days / sum on down days over 20-50d. READS: participation skew.
+
+B19 SUPPORT/RESISTANCE AND MARKET STRUCTURE
+ FORMULA: fractal swing highs/lows (n bars each side), clusters merged within 0.5*ATR; trend =
+ higher-highs/higher-lows count. Combine with MA levels, volume-profile nodes and option walls
+ as a "level stack" where several independent sources coincide. NOT PROVEN: levels hold.
+
+B20 GAP ANALYSIS
+ FORMULA: gap% = open/prevC - 1; in ATR units; vs expected move; fill = price revisits prevC.
+ Show the stock's OWN historical fill rate by gap-size bucket (Myth 9).
+
+B21 52-WEEK HIGH/LOW DISTANCE and drawdown from high. FORMULA: C/max252 - 1.
+
+B22 CANDLESTICK PATTERN SCORING: SKIP. Marshall, Young, Rose (28 patterns, DJIA stocks,
+ 1992-2002, bootstrap tests): no evidence any pattern predicts. Duvinage et al.: no rule beats
+ buy-and-hold after data-snooping correction and costs on 5-minute DJIA data. Thai-market
+ test: mean returns mostly not different from zero. One 1998 study (Caginalp and Laurent)
+ reported significant results; the later out-of-sample work did not replicate it broadly. [V S30]
+
+-------------------------------- C. MARKET AND SECTOR ---------------------------
+
+C1 SPY / QQQ vs 50 and 200 DMA
+ FORMULA: close vs SMA50/SMA200, slope of SMA200, % distance. READS: market trend regime.
+ TYPE: G. FREE: OHLCV.
+
+C2 SECTOR ETF RELATIVE STRENGTH (3 levels)
+ FORMULA: RS = ETF/SPY price ratio, its 50-day change, and its percentile; do the same for
+ stock/sector ETF and stock/SPY. READS: is leadership coming from market, sector, or stock.
+ Map stock to sector ETF via GICS sector from yfinance/EDGAR SIC (XLK, XLF, XLE, XLV, XLY,
+ XLP, XLI, XLB, XLU, XLRE, XLC). NOT PROVEN: persistence beyond weeks to months.
+
+C3 SECTOR ROTATION / RRG QUADRANTS
+ FORMULA (approximation, the official JdK RS-Ratio is proprietary [?]): RS = ETF/SPY;
+ RS-Ratio = 100 * RS / SMA(RS, n) smoothed; RS-Momentum = 100 * RS-Ratio / SMA(RS-Ratio, m).
+ Quadrants: leading (both >100), weakening, lagging, improving. Plot with 8-12 week tails.
+
+C4 BREADTH: % ABOVE 50/200 DMA
+ FORMULA: share of S&P 500 members with close > SMA. READS: participation; narrow rallies show
+ index up, breadth down. FREE: compute from constituents.
+
+C5 ADVANCE/DECLINE LINE
+ FORMULA: cumulative (advancers - decliners). Computed from constituents if no NYSE feed.
+
+C6 McCLELLAN OSCILLATOR
+ FORMULA: EMA19 - EMA39 of (A-D)/(A+D) ratio-adjusted net advances (or raw net advances).
+
+C7 ZWEIG BREADTH THRUST
+ FORMULA: 10-day EMA of A/(A+D) rising from below 0.40 to above 0.615 within 10 trading
+ days. Rare event, tiny sample, so display as an event log, not a signal.
+
+C8 VIX LEVEL (+ VVIX optional). READS: implied 30-day S&P vol; use percentile and regime bands.
+C9 VIX / VIX3M TERM STRUCTURE
+ FORMULA: ratio = VIX / VIX3M; >1 backwardation (near-term stress), <1 contango (normal).
+ FREE: FRED VIXCLS and VXVCLS; Cboe CSVs. [V S12,S39]
+
+C10 MARKET-WIDE PUT/CALL (total, equity, index, ETP)
+ FORMULA: Cboe published ratios. READ each series ONLY against its own history (z-score or
+ percentile). Index PCR runs ~0.9-1.1 and equity ~0.5-0.8 in sampled 2026 days. [V S2]
+ NOT PROVEN: contrarian timing. FREE: Cboe daily page + your archive.
+
+C11 FEAR & GREED-STYLE COMPONENTS
+ Show the seven components separately as percentiles (Section 1.2 / C18). Do not build one score.
+
+C12 HIGH-YIELD CREDIT SPREAD
+ FORMULA: ICE BofA HY OAS (FRED BAMLH0A0HYM2, 3y only) or HYG/IEF ratio. READS: widening =
+ risk-off; credit often moves with equity stress. TYPE: C. [V S12]
+
+C13 RATES AND DOLLAR CONTEXT
+ FRED DGS10, DGS2/T10Y2Y, DTWEXBGS. Context only; show 1m and 3m change.
+
+-------------------------------- D. FUNDAMENTALS (VETO LAYER) -------------------
+
+D1 GROWTH: revenue and EPS growth, YoY and 3y CAGR. FREE: EDGAR companyfacts (us-gaap
+ Revenues / RevenueFromContractWithCustomer..., EarningsPerShareDiluted). Tag names vary by
+ company; implement fallbacks. [V S10]
+D2 MARGINS: gross, operating, net = line / revenue; show trend and vs sector median.
+D3 FREE CASH FLOW and FCF YIELD: FCF = operating cash flow - capex; yield = FCF / market cap
+ (or EV). NOT PROVEN: value. 
+D4 ROE / ROIC: ROE = NI/avg equity; ROIC = NOPAT/(debt+equity-cash). Definitions vary, state yours.
+D5 LEVERAGE: net debt/EBITDA; INTEREST COVERAGE = EBIT/interest expense.
+D6 VALUATION: P/E (TTM), forward P/E, PEG, P/S, EV/EBITDA, each vs own 5y history percentile
+ AND vs sector median. Forward numbers come from analyst data (yfinance) and are estimates.
+ Sector medians need a peer set: use sector ETF holdings or a fixed peer list you maintain.
+D7 ANALYST REVISIONS: change in consensus EPS and target over 30/90d; upgrades vs downgrades.
+ Targets are optimistic and weak predictors: in 2000-2009 only 38% of 12-month targets were met
+ at the end of the year (64% touched at some point). [V S34]
+D8 NEXT EARNINGS DATE and LAST 8 SURPRISES: surprise = (actual - estimate)/|estimate|;
+ show the stock's average post-earnings move vs the options-implied move.
+D9 SHORT INTEREST % FLOAT and DAYS TO COVER: SI/float; SI / average daily volume. FINRA
+ biweekly, lagged. Not proof of an upcoming squeeze.
+D10 INSIDER FORM 4: net open-market purchases vs sales, cluster buys (several insiders),
+ exclude option exercises and tax withholding codes (M, F, G). Fastest ownership data
+ (2 business days). Selling is routine; buying is the more informative side (K). [V S35]
+D11 INSTITUTIONAL 13F: holders and change, quarterly, long-only, 45+ days stale. Context only. [V S35]
+D12 DIVIDENDS/BUYBACKS: yield, payout ratio, net share count change from EDGAR (shares outstanding).
+
+-------------------------------- E. FLOW / SENTIMENT PROXIES --------------------
+
+E1 SHORT INTEREST: see D9. E2 ETF FLOWS: shares outstanding change x NAV for sector/index ETFs
+ (needs daily shares-outstanding snapshots, mostly unavailable free; skip or approximate [?]).
+E3 OFF-EXCHANGE / ATS SHARE
+ FORMULA: FINRA ATS weekly shares / consolidated weekly volume. NEVER label buy or sell: the
+ data has no side, each trade is counted once. 2-4 week lag. [V S11]
+E4 SHORT VOLUME RATIO: FINRA daily short volume / reported volume (off-exchange only).
+ Market makers short as part of liquidity provision; the files do not net offsetting buys,
+ which inflates the apparent ratio. Different from short interest. [V S11]
+E5 RETAIL SENTIMENT (Reddit/StockTwits mention volume): noisy, bot-prone, access unreliable. [V S37]
+E6 NEWS TONE: Loughran-McDonald word lists (finance-specific, not an AI model) applied to
+ headlines: tone = (pos - neg)/(pos + neg). Coarse; negation and context are missed. [K]
+E7 BORROW FEE: stock only, IBKR file proxy; options borrow has no free source. [V S36]

@@ -1,0 +1,21 @@
+# One symbol per line. Remove or reorder symbols to change the stock picker.
+AAPL
+RIVN
+CRCL
+MSFT
+NVDA
+GOOGL
+META
+AMZN
+TSLA
+JPM
+BAC
+XOM
+CVX
+UNH
+LLY
+COST
+WMT
+CAT
+LIN
+NEE

@@ -1,0 +1,355 @@
+================================================================================
+NON-AI SINGLE-TICKER STOCK DASHBOARD: DEEP DESIGN RESEARCH
+Compiled: Saturday, November 21, 2026
+Purpose: design research for a personal tool. NOT investment advice.
+================================================================================
+
+HOW TO READ THIS FILE
+Every factual claim carries a tag:
+  [V] = verified against a source during this research (source ID in S-list at bottom)
+  [K] = standard math or textbook knowledge, not separately sourced
+  [?] = unverified, uncertain, or sources conflict. Test it yourself before building on it.
+I could not live-test any endpoint from my sandbox (no access to cdn.cboe.com etc.),
+so every "this endpoint returns X" statement is from documentation or third-party reports.
+The Codex prompt includes smoke tests so the code verifies these on your machine.
+
+================================================================================
+SECTION 1. EXECUTIVE SUMMARY
+================================================================================
+
+1.1 WHAT THE TOOL SHOULD BE
+A "context and levels" dashboard, not a prediction machine. It answers:
+  - What regime is the market in?   (VIX level and term structure, index trend, breadth, credit)
+  - How is this stock's sector doing relative to the market?
+  - How healthy is this stock, where are its key levels, how wide is the plausible
+    range, and is options positioning likely to damp or amplify moves?
+It never answers "will it go up". Nothing free and honest can.
+
+1.2 RECOMMENDED INDICATOR SET (the short list that earns its place)
+  REGIME (market-wide):   SPY/QQQ vs 50/200 DMA, VIX level + own-history percentile,
+                          VIX/VIX3M ratio, CBOE equity and index put/call as percentiles,
+                          HY credit spread (or HYG/IEF ratio), breadth (% above 50/200 DMA)
+  SECTOR:                 sector ETF relative strength vs SPY, RRG-style quadrant,
+                          stock vs sector vs market relative strength (3 levels)
+  TREND/LEVELS (price):   price vs 20/50/200 SMA, ADX, ATR and ATR%, Bollinger bandwidth,
+                          52-week high/low distance, volume profile POC/value area (from
+                          intraday bars if available), RVOL, swing support/resistance
+  OPTIONS/DEALERS:        net GEX by strike split by expiry bucket, zero-gamma flip
+                          (recomputed), call wall, put wall, net-to-gross GEX ratio,
+                          expected move (ATM straddle and S*IV*sqrt(DTE/365)),
+                          IV term structure, 25-delta skew, IV vs HV, put/call by OI
+                          and volume, bid/ask spread % as a quality filter, OI change
+                          (needs your own nightly archive)
+  VOLATILITY:             IV rank and percentile (needs archive), HV20/HV60, VRP
+                          (IV minus forward realized, shown historically), earnings implied move
+  FUNDAMENTALS (veto):    growth, margins, FCF yield, leverage, interest coverage,
+                          valuation vs own 5y history and vs sector median, next earnings
+                          date, last 8 surprises, Form 4 insider activity, short interest
+  FLOW (low weight):      FINRA short interest (lagged), short volume (labeled as such),
+                          ATS volume share (labeled "no side"), analyst consensus + revisions
+
+1.3 TEN FINDINGS THAT CHANGE THE DESIGN
+  1. Gamma has two axes (sign x magnitude): SUPPORTED. But "near-zero gamma is the
+     worst case" is NOT established. Naive-GEX studies mostly show a MONOTONIC
+     relationship (more negative = wider next day), while one position-based study
+     (OptionMetrics, via Risk.net) found volatility peaks near zero. Show both,
+     claim neither. [V S13,S14,S16,S21,S22]
+  2. The vendor 8-year SPY backtest is real and says what you said: rho -0.36 raw,
+     -0.14 after VIX, -0.03 (p=0.18) after VIX + ATM IV. It is one vendor, one ETF,
+     EOD snapshots, linear controls. A second source (Build Alpha) disagrees on
+     whether GEX adds info beyond recent realized vol. Treat GEX as a REGIME LABEL
+     that mostly overlaps VIX, not as an independent alpha signal. [V S21,S22]
+  3. No study I found supports GEX predicting price DIRECTION. SpotGamma's own docs
+     say it cannot answer up vs down. DEX showed no next-day return signal. [V S21,S24]
+  4. SIGN CONVENTION: your note is partly wrong. SqueezeMetrics' original and the
+     common SpotGamma-style formula use the SAME mapping (calls long gamma for dealers,
+     puts short gamma). The opposite-sign implementations are "customers are net
+     buyers" models (dealers short calls, long puts) and trade-classified/flow models.
+     [V S23,S24,S25]
+  5. Robinhood: "only crypto is official" is OUT OF DATE. Since May 27, 2026 Robinhood
+     offers Agentic Trading through an MCP server, but in a SEPARATE dedicated account
+     for AI agents, not read access to your main portfolio. So your conclusion
+     (optional, read-only, unofficial route for your watchlist) still stands. [V S5]
+  6. Pine Script: correct that it cannot fetch arbitrary URLs. But Pine has
+     request.seed() which reads EOD CSV data from a GitHub repo ("Pine Seeds"), updated
+     only a few times per day. A nightly git push of levels could feed a Pine
+     indicator without manual pasting. Check current onboarding rules first. [V S6][?]
+  7. FRED's ICE BofA OAS series (HY OAS BAMLH0A0HYM2) is truncated to 3 years since
+     April 2026, and FRED's S&P 500 series is limited to 10 years. VIXCLS and VXVCLS
+     (VIX3M) are still there. Archive HY spreads yourself or use a price-ratio proxy. [V S12]
+  8. IV Rank/Percentile, OI change, GEX history, put/call history cannot be backfilled
+     for free. CBOE's free put/call CSVs stop at 2019-10-04. So the nightly archiver
+     IS the MVP, not Phase 2. [V S3,S38]
+  9. 0DTE was 59% of SPX volume in 2025 and hit a record 66.2% in July 2026, but
+     volume is not gamma: Cboe found dealer net 0DTE gamma small because customer flow
+     is balanced, and OI-based GEX cannot see positions opened and closed intraday.
+     Always split GEX by expiry bucket. [V S18,S26]
+  10. Price indicators are transforms of one OHLCV series. Ten agreeing = one piece
+     of evidence. Group by family, never average into one "bullish score". [K]
+
+================================================================================
+SECTION 2. VERIFICATION OF YOUR NOTES (confirm / correct / extend)
+================================================================================
+
+C1  Robinhood API. PARTLY OUTDATED.
+    - Official crypto-only API still exists: key-based, read accounts/holdings/quotes
+      and place crypto orders. [V S4]
+    - New (2026-05-27): "Agentic Trading" beta. You open a dedicated agentic account,
+      fund it, and connect an AI agent through Robinhood's Trading MCP. The agent only
+      touches funds in that account. Launch was stocks first; reports differ on
+      whether options are live yet. [V S5][?]
+    - It does not expose your main account's watchlist or positions, and it is built
+      for AI agents, which is not your non-AI design.
+    - robin_stocks / pyhood remain unofficial, wrap private endpoints, can break, and
+      are a ToS gray area. [V S5-adjacent: pyhood and robinhood-cli READMEs say so]
+    - Practical Phase 2 options, in order of safety: (a) a plain tickers.txt you edit,
+      (b) export a CSV from Robinhood account reports and parse it locally [?],
+      (c) unofficial read-only client with the session token kept local. Never trade.
+
+C2  TradingView / Pine. MOSTLY RIGHT, ONE IMPORTANT ADDITION.
+    - No HTTP calls from Pine. A script may make up to 40 unique request.*() calls,
+      but those pull TradingView data (other symbols, financials, economic series). [V S6]
+    - request.seed() reads data from a GitHub repo that you control: "use TradingView
+      as your frontend and a GitHub repository as your backend." It is end-of-day data
+      and "can only be updated a few times per day". [V S6]
+    - Unknowns to check before building: whether a new seed repo needs TradingView
+      approval, and that the repo is public so your levels are public. [?]
+    - Webhook alerts OUT from TradingView typically require a paid TradingView plan. [?]
+    - Fallback that always works: your tool prints a copy-paste block and a Pine
+      script with inputs (call wall, put wall, flip, expected move high/low).
+
+C3  CBOE delayed quotes JSON. CONFIRMED UNDOCUMENTED.
+    - API catalogs describe https://cdn.cboe.com/api/global/delayed_quotes/options/{TICKER}.json
+      and /delayed_quotes/quotes/_SPX.json as "public, unauthenticated JSON endpoints
+      that back the delayed-quote pages", "not formally documented as a supported product;
+      captured here as an observed public surface". [V S1]
+    - Cboe's official programmatic route is paid (LiveVol, DataShop). [V S1]
+    - Risks: schema can change without notice, throttling or blocking unknown, terms
+      unclear (Cboe site terms apply; Cboe states market statistics are "furnished
+      without responsibility for accuracy"). [V S2]
+    - Mitigations: one request per ticker per run, cache to disk, polite User-Agent,
+      schema validation with loud failure, never redistribute, keep a fallback
+      (Alpaca indicative options feed or Yahoo options chain). [K]
+    - Indexes use an underscore (_SPX). Index chains include SPXW weeklies/dailies. [V S1]
+
+C4  Open interest timing. CONFIRMED, WITH ONE EXTRA LAG.
+    - OI is computed by OCC end of day, published once per day before the open, and
+      does not change intraday. [V S38]
+    - Some distribution paths deliver it a further business day later. [V S38 Alpaca forum]
+    - So a 15-minute delay does not hurt OI-based walls and GEX levels. It does affect
+      spot, IV, bids/asks and the greeks you use to recompute. Always stamp
+      "OI as of <date>" and "quotes as of <timestamp>".
+    - Volume vs OI: a contract with volume 20 and OI 0 next day means it was opened and
+      closed same day. Volume alone shows neither side nor open/close. [V S38]
+
+C5  Free price sources. CONFIRMED, plus changes.
+    - Yahoo/yfinance: unofficial, undocumented, rate limits not published; users hit
+      429s, one report of a cut-off near 950 tickers/day (Nov 2024); Yahoo's terms
+      limit use to personal/non-commercial. The v7 quote endpoint reportedly returned
+      401 from Jan 2026; v8 chart endpoint still worked. [V S8]
+    - Stooq: AS OF MARCH 2026 requires an API key obtained via on-site CAPTCHA, with an
+      undisclosed daily quota. pandas-datareader's stooq reader broke. [V S9]
+    - Alpaca free "Basic": real-time IEX only (30 websocket symbols), 15-minute delayed
+      SIP over REST, indicative options feed, 200 requests/min, needs a free account
+      key. Paid Algo Trader Plus is $99/mo (not needed). [V S7]
+
+C6  FRED. CONFIRMED.
+    - ICE BofA series (incl. BAMLH0A2HYB, AAA, HY OAS) limited to the last 3 years since
+      April 2026. [V S12]
+    - FRED S&P 500 (SP500) carries only 10 years of daily history. [V S12]
+    - VIXCLS and VXVCLS (CBOE 3-month vol) are available. [V S12,S39]
+
+C7  Gamma, two axes. See Section 3.
+
+C8  Vendor backtest (FlashAlpha). CONFIRMED. See Section 3.4.
+
+C9  "No evidence of direction." CONFIRMED. See Section 3.5.
+
+C10 Sign conventions. YOUR NOTE NEEDS A FIX. See Section 3.6.
+
+C11 0DTE share. CONFIRMED and updated: 59% of SPX volume for 2025 (2.3M contracts/day);
+    record 66.2% in July 2026. [V S26]
+
+C12 Max pain study. CONFIRMED WITH NUANCE. See Myth 2.
+
+C13 Put/call, no universal 1.0 line. CONFIRMED with current numbers:
+    Cboe daily stats show total 0.76-1.00, index 0.89-1.11, equity 0.47-0.86 across
+    sampled 2026 days, e.g. 2026-10-22: total 0.94 / index 1.02 / equity 0.69;
+    2026-11-12: total 0.89 / index 0.97 / equity 0.72. [V S2]
+    Historical CSVs end 2019-10-04, so you must archive the daily page yourself. [V S3]
+
+C14 Form 4 / 13F timing. CONFIRMED. Form 4 due within 2 business days; 13F due 45 days
+    after quarter end, so data is 45 days old at filing and up to ~135 days old before
+    the next one, and covers reportable long positions only. [V S35][K]
+
+C15 FINRA. CONFIRMED. Short interest reported twice a month (settlement 15th and
+    month-end), published about the 7th business day after settlement. Daily short sale
+    VOLUME files post by 6pm ET same day, are off-exchange only (not consolidated),
+    and are explicitly NOT short interest. ATS/OTC volume is weekly, 2-week delayed
+    for Tier 1 (S&P 500/Russell 1000) and 4-week for others, with no buy/sell side. [V S11]
+
+C16 Borrow fee. REFINED. No free reliable OPTIONS borrow fee (it is not a published
+    quantity; you can only back out an implied borrow from put-call parity, which is
+    noisy). Stock borrow fee and shares available ARE published by Interactive Brokers
+    in a public file for its own lending book. It is one broker's proxy, not the
+    market. Archive it if you want a history. [V S36][?]
+
+C17 IV overstates realized. CONFIRMED as vendor-sourced. tastylive says about 85% of the
+    time; OptionStrat measured SPX 30-day implied above forward realized ~84% of days by
+    ~3.8 vol points on average. Frequency is not magnitude: the minority of days with
+    realized > implied are where short-vol losses concentrate. Academic anchor: Carr and
+    Wu (variance risk premium). [V S31]
+
+C18 CNN Fear & Greed. CONFIRMED: 7 public components, equal-weighted, but each is scaled
+    by "deviation from its average vs normal divergence" and exact scoring is not
+    published. Components: S&P 500 vs 125-day MA, net 52-week highs/lows (NYSE), volume
+    breadth (McClellan Volume Summation in some replications), put/call (5-day avg),
+    VIX vs 50-day MA, 20-day stock-vs-bond return gap, junk bond spread. [V S33]
+    Design implication: show your own components separately; do not clone the composite.
+
+C19 Reddit and StockTwits. Reddit has progressively closed free API/RSS access
+    (self-service API closed Nov 2025; RSS ending Nov 13, 2026; broad public API access
+    planned to end Mar 2027, per trade press). StockTwits has a public feed but no
+    formal free developer program I could verify. Do not build core features on either. [V S37][?]
+
+================================================================================
+SECTION 3. THE GAMMA QUESTION
+================================================================================
+
+3.1 MECHANICS [K]
+  - A dealer delta-hedges. If dealers are LONG gamma, their delta rises as price
+    rises, so they SELL into rallies and BUY dips. Counter-trend, damps volatility.
+  - If dealers are SHORT gamma they BUY rallies and SELL dips. Pro-trend, amplifies.
+  - Black-Scholes gamma (per share): G = exp(-qT) * phi(d1) / (S * sigma * sqrt(T)).
+    It is highest at the money and for short maturities, and FALLS as sigma rises.
+  - Dollar GEX per 1% move at strike i: G_i * OI_i * 100 * sign_i * S^2 * 0.01.
+    SpotGamma's published formula is the same shape. [V S24]
+
+3.2 THE TWO-AXIS FRAMEWORK (sign x magnitude): SUPPORTED, WITH CAVEATS
+  - Large positive: stabilizing / mean-reverting. Large negative: amplifying /
+    momentum. Evidence below.
+  - Near-zero |net gamma|: "no anchor" is a reasonable reading (little net hedging
+    flow in either direction, and spot is near the flip so the sign can change on a
+    small move). But the claim that this is WORSE than negative gamma is contested.
+
+3.3 EVIDENCE TABLE
+  SUPPORTS THE CONDITIONAL STORY
+  - Baltussen, Da, Lammers, Martens (JFE 2021, vol 142, 377-403): intraday market
+    momentum (return in the last 30 minutes predicted by the rest of the day) is
+    linked to gamma hedging demand. Using an S&P 500 option proxy for negative gamma
+    exposure (NGE), momentum is present when NGE is negative and stronger when more
+    negative; on positive-NGE days there is no significant intraday momentum. [V S13]
+    NOTE: this is continuation of the day's move, conditional on regime. Not an
+    unconditional direction signal.
+  - Barbon and Buraschi, "Gamma Fragility" (working paper, rev. 2021): large aggregate
+    dealer gamma imbalances link to intraday momentum (negative) and reversal
+    (positive), explain intraday volatility and autocorrelation, and relate to
+    flash-crash frequency and size. Effect stronger for less liquid underlyings. [V S14]
+  - Barbon, Beckmeyer, Buraschi, Moerke (2021): large negative (positive) gamma
+    imbalance relative to dollar volume gives end-of-day momentum (reversal). [V S14]
+  - Ni, Pearson, Poteshman (JFE 2005, 78(1) 49-87): stock prices cluster at strikes on
+    expiration dates; hedge rebalancing by option market makers and manipulation both
+    contribute. Secondary sources cite at least ~16.5 bp of return impact per
+    expiration (1996-2002). [V S15][?]
+  - Adams et al. (SSRN 5641974, via Quantpedia): S&P 500 volatility about 60 annualized
+    bp lower on days with 0DTE trading; market maker hedging is the proposed channel
+    (market makers hold larger net gamma on those days). [V S19]
+  - OptionMetrics (DeSimone, via Risk.net): volatility is greatest when dealer gamma
+    is flat (near zero), using position-based estimates. [V S16]
+  LIMITS THE STORY
+  - Cboe (Mandy Xu, 2023): despite huge SPX 0DTE volume, customer flow is balanced so
+    market maker net 0DTE gamma is small; implied hedging is about 1.3% to 1.9% of S&P
+    futures daily notional, "hardly the tail wagging the dog". Cboe is an interested
+    party. [V S18]
+  - Princeton senior thesis (2026): canonical gamma hedging channel adds no meaningful
+    predictive power for intraday variance forecasts (QLIKE and rank correlations). Student
+    work, treat as a flag not a verdict. [V S20]
+  - Vasquez, Amaya, Pearson, Garcia-Ares (2025, Cboe Options Institute grant): estimates
+    the MAXIMUM impact of option-market-maker gamma on index volatility from proprietary
+    trade data. A secondary citation says actual dealer gamma is positive on almost
+    every session, i.e. naive GEX is often wrong about the sign. I read only the
+    abstract. [V S17][?]
+  - FlashAlpha 8-year SPY backtest (below). [V S21]
+
+3.4 THE VIX-PROXY WEAKNESS: CONFIRMED
+  FlashAlpha (vendor of a GEX product) tested its own data: 1,972 SPY end-of-day
+  snapshots, 2018-2026, next-day realized vol proxied by |log return| * sqrt(252).
+  Spearman correlations of GEX with next-day RV:
+     raw                      -0.36  (p ~ 5e-60)
+     controlling VIX          -0.14  (p = 1.2e-9)
+     controlling VIX + ATM IV -0.03  (p = 0.18, not significant)
+  DEX vs next-day return: ~0 (top-minus-bottom 0.00%, t=0.04). VEX vs next-day ATM IV
+  change: -0.16 raw, -0.01 (p=0.77) after both controls. CHEX fragile. [V S21]
+  Caveats: single ETF, EOD snapshots (intraday claims untested), linear residual
+  controls, and one-day |return| is a very noisy volatility proxy (low power).
+  Counter-evidence: Build Alpha (SPX options, 2004-2026) finds the lowest GEX quintile
+  has ~3x the next-day range of the highest, monotonic across quintiles, and that
+  normalizing by the prior 20-day ATR shrinks but keeps the effect (rank corr -0.20).
+  That controls for recent REALIZED vol, not for IMPLIED vol, so it does not
+  contradict FlashAlpha directly. [V S22]
+  Mechanical reason for the overlap: BS gamma falls as sigma rises, and spot-IV and
+  dealer positioning co-move, so a GEX magnitude series partly re-expresses VIX. [K]
+  DESIGN CONSEQUENCE: always show VIX/ATM IV next to GEX. Label GEX a regime context.
+
+3.5 DIRECTION: NO SUPPORT
+  - SpotGamma: GEX "cannot answer, by itself, 'Will the market go up or down?'". [V S24]
+  - FlashAlpha: DEX does not predict next-day SPY direction. [V S21]
+  - Baltussen is conditional continuation, not directional prediction. [V S13]
+  - GEX walls as support/resistance: vendor lore, no peer-reviewed test I found. [?]
+
+3.6 SIGN CONVENTIONS (your note, corrected)
+  Convention A (SqueezeMetrics 2016/2017 white paper; SpotGamma-style public formula):
+    Assume investors overwrite calls (dealers BUY calls) and buy puts for protection
+    (dealers SELL puts). Therefore dealers: calls = LONG gamma (+), puts = SHORT gamma (-).
+    net GEX = sum( call GEX ) - sum( put GEX ). SpotGamma calls this "a simplifying
+    inventory convention, not a rule of option mathematics". [V S23,S24]
+    NOTE: "SpotGamma-style (calls +, puts -)" and "SqueezeMetrics (dealers long calls,
+    short puts)" are the SAME mapping. They do not conflict.
+  Convention B ("customers are net buyers"): dealers short calls AND long puts, so
+    calls = (-), puts = (+). It flips every sign vs A. Used in some open-source models
+    (e.g. a whitepaper assuming "dealers are net short options: short calls, long puts"
+    and a quant-lessons repo coding calls -1, puts +1). [V S25]
+  Convention C (flow/trade-classified): infer dealer position from today's classified
+    trades; can disagree with A on a given day. [V S25]
+  Confusion in the wild: one MQL5 tutorial states dealers are short calls and long puts,
+  then treats calls as positive anyway. Check every library you copy. [V S25]
+  RECOMMENDATION
+    - Implement A as the default, label it "ASSUMED dealer positioning".
+    - Show gross call GEX and gross put GEX separately, and a NET-TO-GROSS RATIO
+      = |net| / (call_GEX + |put_GEX|). Low ratio = the net sign is a small difference
+      of big numbers and flips under tiny assumption changes. Caption: "sign low confidence".
+    - Single stocks: retail call buying breaks the "customers overwrite calls" premise, so
+      sign confidence is lower than for SPX/SPY/QQQ. [K]
+    - A toggle for convention B is fine but it just negates everything; its value is
+      pedagogical.
+
+3.7 THE EXPIRY PROBLEM
+  - 0DTE share of SPX volume: 59% (2025), 66.2% (July 2026). [V S26]
+  - Volume share is not OI or gamma share. Newly listed dailies carry little overnight OI,
+    and positions opened and closed intraday never appear in OI-based GEX. [V S38][K]
+  - Split every GEX view into buckets: 0DTE, 1-7 DTE (weekly), 8-45 DTE (monthly cycle),
+    >45 DTE (LEAPS-ish). Report "share of total gamma from the nearest expiry" (SpotGamma
+    publishes such a metric). Levels that depend on one expiring bucket are flagged
+    "expires today/this week". [V S24][K]
+
+3.8 ZERO-GAMMA FLIP: HOW TO COMPUTE [K]
+  The published gamma is evaluated at current spot. The flip is the spot S* where total
+  net gamma crosses zero, so you must re-price:
+    1. Grid of hypothetical spots, e.g. S0 * [0.85 ... 1.15] in 0.25% steps.
+    2. For every contract with valid IV, OI > 0: d1(S) = (ln(S/K) + (r - q + 0.5 s^2) T) /
+       (s sqrt(T)); gamma(S) = exp(-qT) phi(d1) / (S s sqrt(T)). Hold each contract's IV
+       fixed (sticky-strike assumption; state it). T measured to 16:00 ET of expiry,
+       with a floor (e.g. 1/(252*6.5) years) so 0DTE does not explode.
+    3. net(S) = sum_i sign_i * gamma_i(S) * OI_i * 100 * S^2 * 0.01.
+    4. Flip = linear interpolation at sign change nearest to spot. Handle zero crossings
+       (report all, mark the one nearest spot) and no crossing (report "none in range").
+    5. Plot net(S) vs S: this "gamma profile curve" is the honest signature chart.
+  r from FRED DGS3MO or a constant; q from dividend yield or 0 (state it).
+
+3.9 REGIME LABELS (use percentiles of own history, never fixed dollar thresholds)
+    STABILIZING:  net GEX high positive percentile AND spot above flip
+    AMPLIFYING:   net GEX negative (or low percentile) AND spot below flip
+    UNANCHORED:   |net GEX| in low percentile OR spot within ~0.5 expected-move of flip
+    CONFLICTED:   expiry buckets disagree in sign, or net-to-gross ratio low
+  Each label ships with: as-of time, OI date, convention, and the caption
+  "Describes how moves may be damped or amplified. Does NOT predict direction."
