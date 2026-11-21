@@ -2,6 +2,7 @@ import pandas as pd
 import streamlit as st
 
 from . import analytics as calc, charts
+from . import research_views
 from .scope import BENCHMARK, COMPARISON, SECTORS
 from .stress_view import market_stress
 from .views import Session, return_chart, signed
@@ -149,6 +150,7 @@ def market(session: Session, open_sector) -> None:
     market_stress(session)
     _market_leadership(session, open_sector)
     _sources(session)
+    research_views.market(session)
 
 
 def _ranking_table(ranking: pd.DataFrame) -> None:
@@ -230,3 +232,4 @@ def sector(session: Session, chosen: str, open_stock) -> None:
         member = st.selectbox("Sector member", moves.index, key=f"member_{chosen}")
         st.button(f"Open {member} stock detail", on_click=open_stock, args=(member,))
     _sources(session)
+    research_views.sector(session, chosen)

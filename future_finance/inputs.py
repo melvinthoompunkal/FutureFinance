@@ -11,6 +11,7 @@ from .issuer_inputs import (
     iso_date, parse_earnings, parse_filings, publication_time,
 )
 from .market_calendar import sessions_between
+from .research_inputs import RESEARCH_FILES, ResearchInputs, parse_research
 from .scope import BENCHMARK, NEW_YORK, SECTORS, SYMBOL_PATTERN
 
 PRICE_FIELDS = ["close", "split_close", "total_return_close"]
@@ -23,7 +24,7 @@ STRESS_FILE = "stress.csv"
 STRESS_SERIES = ("VIX", "VIX3M", "OAS")
 STRESS_FIELDS = ["session", "series", "value", "available_at"]
 BUNDLE_FILES = ("source.json", "bars.csv", "membership.csv", STOCK_SECTORS_FILE, STRESS_FILE,
-                FILINGS_FILE, EARNINGS_FILE)
+                FILINGS_FILE, EARNINGS_FILE, *RESEARCH_FILES)
 
 
 @dataclass
@@ -39,6 +40,7 @@ class Inputs:
     earnings: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=EARNINGS_FIELDS))
     issuer_sources: dict[str, dict[str, str]] = field(default_factory=dict)
     stock_sectors: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=MEMBER_FIELDS))
+    research: ResearchInputs = field(default_factory=ResearchInputs)
 
     def prices(self, field: str) -> pd.DataFrame:
         return self.bars.pivot(index="session", columns="symbol", values=field).sort_index()
@@ -170,6 +172,7 @@ def parse_bundle(files: dict[str, bytes]) -> Inputs:
             raise ValueError("source.json requires a membership label for membership.csv.")
         members = _sector_rows("membership.csv", files["membership.csv"])
     inputs = Inputs(bars, members, source, membership_source)
+    inputs.research = parse_research(files, metadata)
     if STOCK_SECTORS_FILE in files:
         inputs.stock_sectors = _sector_rows(STOCK_SECTORS_FILE, files[STOCK_SECTORS_FILE])
     if STRESS_FILE in files:

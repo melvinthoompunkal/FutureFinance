@@ -6,6 +6,7 @@ import pandas as pd
 from .inputs import BAR_FIELDS, MEMBER_FIELDS, Inputs
 from .issuer_inputs import EARNINGS_FIELDS, FILING_FIELDS
 from .market_calendar import sessions_between
+from .research_demo import make_research_demo
 from .scope import NEW_YORK, SECTORS
 
 DEMO_SECTOR = {
@@ -95,8 +96,10 @@ def make_demo() -> Inputs:
         "VIX3M": 22 + 2 * np.sin(x[:-1] / 19),
         "OAS": 3.4 + 0.26 * np.cos(x[:-1] / 11),
     }).melt(id_vars=["session", "available_at"], var_name="series", value_name="value")
-    return Inputs(pd.DataFrame(bars, columns=BAR_FIELDS), membership,
+    bar_frame = pd.DataFrame(bars, columns=BAR_FIELDS)
+    apple = bar_frame.loc[bar_frame["symbol"].eq("AAPL")].set_index("session")["close"]
+    return Inputs(bar_frame, membership,
                   "Synthetic daily bars", "Synthetic 100-stock universe", demo=True, filings=filings,
                   stress=stress, stress_sources={"VIX": "Synthetic volatility", "VIX3M": "Synthetic volatility",
                                                  "OAS": "Synthetic credit spread"}, earnings=earnings,
-                  stock_sectors=stock_sectors)
+                  stock_sectors=stock_sectors, research=make_research_demo(apple))

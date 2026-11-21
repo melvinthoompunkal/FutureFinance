@@ -9,6 +9,7 @@ import pandas as pd
 
 from .inputs import BAR_FIELDS, Inputs, parse_bundle, source_metadata
 from .market_calendar import capture_cutoff, sessions_between
+from .research_inputs import EXPORTS, local_date
 from .scope import BENCHMARK, NEW_YORK, SYMBOL_PATTERN
 from .stress import observations_as_of
 
@@ -43,12 +44,15 @@ def _aliases(files: dict[str, bytes]) -> pd.DataFrame:
     return aliases
 
 
-def _identify(frame: pd.DataFrame, aliases: pd.DataFrame, *, releases: bool = False) -> pd.DataFrame:
+def _identify(frame: pd.DataFrame, aliases: pd.DataFrame, *, releases: bool = False,
+              keys: list[str] | None = None, date_column: str | None = None) -> pd.DataFrame:
     frame = frame.copy()
     frame["security_id"] = "ticker:" + frame["symbol"]
     if frame.empty:
         return frame
-    effective = frame["available_at"].dt.tz_convert(NEW_YORK) if releases else frame["session"]
+    effective = frame[date_column or ("available_at" if releases else "session")]
+    if effective.dt.tz is not None:
+        effective = effective.dt.tz_convert(NEW_YORK)
     dates = effective.dt.strftime("%Y-%m-%d")
     by_symbol = frame.groupby("symbol").groups
     for symbol, spans in aliases.groupby("symbol"):
@@ -58,9 +62,10 @@ def _identify(frame: pd.DataFrame, aliases: pd.DataFrame, *, releases: bool = Fa
             if row.end:
                 mask &= symbol_dates.lt(row.end)
             frame.loc[symbol_dates[mask].index, "security_id"] = row.security_id
-    keys = ["available_at"] if releases else ["session"]
-    if releases and "period" in frame:
-        keys.append("period")
+    if keys is None:
+        keys = ["available_at"] if releases else ["session"]
+        if releases and "period" in frame:
+            keys.append("period")
     if frame.duplicated([*keys, "security_id"]).any():
         raise ValueError("More than one row resolves to the same security on a session.")
     return frame
@@ -76,6 +81,12 @@ def _display_symbols(inputs: Inputs, aliases: pd.DataFrame, session: date) -> di
         if not frame.empty:
             local_days = frame["available_at"].dt.tz_convert(NEW_YORK).dt.tz_localize(None).dt.normalize()
             rows = pd.concat([rows, frame.assign(session=local_days)[fields]], ignore_index=True)
+    cutoff = capture_cutoff(session)
+    for frame in inputs.research.tables.values():
+        if "security_id" in frame and not frame.empty:
+            visible = frame.loc[frame["available_at"].le(cutoff)]
+            rows = pd.concat([rows, visible.assign(session=local_date(visible["available_at"]))[fields]],
+                             ignore_index=True)
     newest = rows.sort_values("session").drop_duplicates("security_id", keep="last")
     names = dict(zip(newest["security_id"], newest["symbol"]))
     day = session.isoformat()
@@ -103,13 +114,28 @@ def _published(metadata: dict, dataset: str, now: datetime) -> str | None:
     raise ValueError(f"{dataset}_published_at must be an offset timestamp at or before collection.")
 
 
-def prepare_export(files: dict[str, bytes], session: date, now: datetime) -> tuple[Inputs, dict]:
+def prepare_export(files: dict[str, bytes], session: date, now: datetime,
+                   research_history: dict[str, pd.DataFrame] | None = None) -> tuple[Inputs, dict]:
     inputs = parse_bundle(files)
     metadata = source_metadata(files)
     synthetic = metadata.get("synthetic", False)
     if not isinstance(synthetic, bool):
         raise ValueError("synthetic in source.json must be true or false.")
+    research = inputs.research
+    for name, prior in (research_history or {}).items():
+        label = metadata["research_sources"][name]["label"].strip()
+        existing = research.sources.get(name, {})
+        source = {"status": "loaded", "label": label}
+        if existing.get("detail"):
+            source["detail"] = f"Current export rejected. Using archived observations. {existing['detail']}"
+        research.sources[name] = source
+        keys = [*EXPORTS[name].keys, "available_at"]
+        current = research.tables.get(name)
+        combined = pd.concat([prior, current], ignore_index=True) if current is not None else prior
+        research.tables[name] = (combined.drop_duplicates(keys, keep="last")
+                                 .sort_values(keys).reset_index(drop=True))
     day = pd.Timestamp(session)
+    cutoff = capture_cutoff(session)
     inputs.bars = inputs.bars.loc[inputs.bars["session"].le(day)].copy()
     inputs.members = inputs.members.loc[inputs.members["session"].le(day)].copy()
     inputs.stock_sectors = inputs.stock_sectors.loc[inputs.stock_sectors["session"].le(day)].copy()
@@ -144,7 +170,7 @@ def prepare_export(files: dict[str, bytes], session: date, now: datetime) -> tup
     sources = {
         "prices": {
             "status": "available", "label": inputs.source,
-            "observed_at": (capture_cutoff(session) - timedelta(minutes=30)).isoformat(),
+            "observed_at": (cutoff - timedelta(minutes=30)).isoformat(),
             "published_at": _published(metadata, "prices", now),
             "first_session": first_bar.date().isoformat(),
         },
@@ -157,7 +183,7 @@ def prepare_export(files: dict[str, bytes], session: date, now: datetime) -> tup
         },
     }
     if inputs.stress_sources:
-        known = observations_as_of(inputs.stress, day, capture_cutoff(session))
+        known = observations_as_of(inputs.stress, day, cutoff)
         stress_sources = {}
         for series, label in inputs.stress_sources.items():
             history = known.loc[known["series"].eq(series)]
@@ -172,13 +198,40 @@ def prepare_export(files: dict[str, bytes], session: date, now: datetime) -> tup
     for name, source in inputs.issuer_sources.items():
         history = getattr(inputs, name)
         if source["status"] == "loaded":
-            history = _identify(history.loc[history["available_at"].le(capture_cutoff(session))],
+            history = _identify(history.loc[history["available_at"].le(cutoff)],
                                 aliases, releases=True)
             setattr(inputs, name, history)
             source["status"] = "missing at cutoff" if history.empty else "available"
             if not history.empty:
                 source["published_at"] = history["available_at"].max().tz_convert(NEW_YORK).isoformat()
         sources[name] = source
+    for name, source in research.sources.items():
+        if source["status"] == "loaded":
+            if name in ("options", "estimates"):
+                # Keep late observations for the next publication while preserving this evening's cutoff.
+                received = research.known(name, now)
+                frame = received.loc[local_date(received["available_at"]).le(day)].copy()
+            else:
+                frame = research.known(name, cutoff).copy()
+            if "symbol" in frame:
+                keys = [key for key in EXPORTS[name].keys if key != "symbol"]
+                date_column = next((key for key in ("session", "observed_at", "published_at", "start_at")
+                                    if key in frame), "available_at")
+                try:
+                    frame = _identify(frame, aliases, keys=[*keys, "available_at"], date_column=date_column)
+                except ValueError as error:
+                    del research.tables[name]
+                    sources[name] = {"status": "invalid export", "detail": str(error)}
+                    continue
+            research.tables[name] = frame
+            known = frame.loc[frame["available_at"].le(cutoff)]
+            source["status"] = "available" if not known.empty else "missing at cutoff"
+            if not known.empty:
+                source["published_at"] = known["available_at"].max().tz_convert(NEW_YORK).isoformat()
+                source["rows_at_cutoff"] = len(known)
+        sources[name] = source
+    if "headlines" not in research.tables:
+        research.dictionary = {}
     return inputs, {
         "synthetic": synthetic,
         "vintage": "synthetic" if synthetic else "reconstructed export",

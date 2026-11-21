@@ -1,7 +1,7 @@
 """Store immutable inputs and publish complete sessions through a local catalog."""
 
 from contextlib import closing, contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import gzip
 from hashlib import sha256
 import json
@@ -13,9 +13,10 @@ import duckdb
 import pandas as pd
 
 from .archive_inputs import ALIAS_FILE, prepare_export
-from .inputs import BAR_FIELDS, BUNDLE_FILES, MEMBER_FIELDS, STRESS_FIELDS, Inputs, read_files
+from .inputs import BAR_FIELDS, BUNDLE_FILES, MEMBER_FIELDS, STRESS_FIELDS, Inputs, read_files, source_metadata
 from .issuer_inputs import EARNINGS_FIELDS, FILING_FIELDS
 from .market_calendar import WINDOWS, capture_cutoff, exchange
+from .research_inputs import EXPORTS, RESEARCH_FILES, ResearchInputs, local_date, parse_research
 from .scope import NEW_YORK
 
 ARCHIVE_SCHEMA = 1
@@ -39,6 +40,13 @@ CREATE TABLE IF NOT EXISTS publications (
     manifest TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS publications_by_session ON publications (session, run_id);
+CREATE TABLE IF NOT EXISTS preopen_options (
+    run_id INTEGER PRIMARY KEY REFERENCES runs (id),
+    label TEXT NOT NULL,
+    synthetic INTEGER NOT NULL,
+    paths TEXT NOT NULL,
+    raw_path TEXT NOT NULL
+);
 """
 
 
@@ -143,6 +151,73 @@ class Archive:
             )
             return self._finish(connection, run_id, "published")
 
+    def _capture_preopen(self, folder: Path, run_id: int, session: date, now: datetime) -> dict:
+        files = read_files(folder, ("source.json", "options.csv"))
+        if "options.csv" not in files:
+            return self._record(run_id, "waiting", "Awaiting a permitted pre-open options export.")
+        metadata = source_metadata(files)
+        research = parse_research(files, metadata)
+        source = research.sources["options"]
+        if source["status"] != "loaded":
+            return self._record(run_id, "failed", source["detail"])
+        synthetic = metadata.get("synthetic", False)
+        if not isinstance(synthetic, bool):
+            raise ValueError("synthetic in source.json must be true or false.")
+        opening = exchange().session_open(session)
+        known = research.known("options", min(now, opening))
+        rows = known if known.empty else known.loc[
+            local_date(known["observed_at"]).eq(pd.Timestamp(session))
+            & known["observed_at"].lt(opening) & known["oi_session"].notna()
+        ]
+        if rows.empty:
+            return self._record(run_id, "waiting", "No dated open interest available before the opening bell.")
+        with duckdb.connect(config={"threads": 2}) as connection:
+            paths = self._partitions(connection, "preopen_options", rows)
+        raw = self._raw("options.csv", files["options.csv"])
+        with self._connect(write=True) as connection:
+            connection.execute("INSERT INTO preopen_options VALUES (?, ?, ?, ?, ?)",
+                               (run_id, source["label"], synthetic, _json(paths), raw))
+            return self._finish(connection, run_id, "captured", f"{len(rows)} pre-open contract observations.")
+
+    def _research_history(self, files: dict[str, bytes], session: date) -> dict[str, pd.DataFrame]:
+        metadata = source_metadata(files)
+        configured = metadata.get("research_sources")
+        synthetic = metadata.get("synthetic", False)
+        if not isinstance(configured, dict) or not isinstance(synthetic, bool):
+            return {}
+        histories = {}
+        with self._connect() as catalog, duckdb.connect(config={"threads": 2}) as storage:
+            for name in ("options", "estimates"):
+                source = configured.get(name)
+                if (not isinstance(source, dict) or source.get("permitted") is not True
+                        or not isinstance(source.get("label"), str) or not source["label"].strip()):
+                    continue
+                label = source["label"].strip()
+                latest = catalog.execute(
+                    """SELECT json_extract(manifest, ?) AS paths FROM publications
+                       WHERE session <= ? AND json_extract(manifest, '$.synthetic') = ?
+                         AND json_extract(manifest, ?) = ? AND json_type(manifest, ?) = 'array'
+                       ORDER BY session DESC, run_id DESC LIMIT 1""",
+                    (f"$.tables.{name}", session.isoformat(), synthetic, f"$.sources.{name}.label",
+                     label, f"$.tables.{name}"),
+                ).fetchone()
+                paths = json.loads(latest["paths"]) if latest else []
+                if name == "options":
+                    start = session - timedelta(days=380)
+                    captures = catalog.execute(
+                        """SELECT p.paths FROM preopen_options p JOIN runs r ON p.run_id = r.id
+                           WHERE p.label = ? AND p.synthetic = ? AND r.session BETWEEN ? AND ? ORDER BY r.id""",
+                        (label, synthetic, start.isoformat(), session.isoformat()),
+                    ).fetchall()
+                    paths.extend(path for row in captures for path in json.loads(row["paths"]))
+                if paths:
+                    files_to_read = [str(self.root / path) for path in dict.fromkeys(paths)]
+                    frame = storage.read_parquet(files_to_read, hive_partitioning=False, union_by_name=True).df()
+                    for column in frame.select_dtypes(include="datetimetz"):
+                        frame[column] = frame[column].astype("datetime64[ns, UTC]")
+                    histories[name] = frame.reindex(columns=EXPORTS[name].columns)
+        return histories
+
     def capture(self, folder: Path, session: date, window: str, *,
                 now: datetime | None = None, scheduled: bool = False) -> dict | None:
         now = (now or datetime.now(NEW_YORK)).astimezone(NEW_YORK)
@@ -155,21 +230,30 @@ class Archive:
             return None
         try:
             if window == "pre-open":
-                return self._record(run_id, "waiting", "No verified pre-open filing or options input configured.")
+                return self._capture_preopen(folder, run_id, session, now)
             files = read_files(folder, (*BUNDLE_FILES, ALIAS_FILE))
             if not files:
                 return self._record(run_id, "waiting", "Awaiting a permitted price export.")
-            inputs, metadata = prepare_export(files, session, now)
+            prior = self._research_history(files, session) if "source.json" in files else None
+            inputs, metadata = prepare_export(files, session, now, prior)
             with duckdb.connect(config={"threads": 2}) as connection:
                 tables = {name: self._partitions(connection, name, getattr(inputs, name))
                           for name in TABLE_FIELDS
                           if name in ("bars", "members") or not getattr(inputs, name).empty}
+                tables.update({name: self._partitions(connection, name, frame)
+                               for name, frame in inputs.research.tables.items() if not frame.empty})
+            approved = {f"{name}.csv" for name in inputs.research.tables
+                        if "detail" not in inputs.research.sources[name]}
+            if "headlines.csv" in approved:
+                approved.add("headline_dictionary.csv")
             manifest = {
                 "schema": ARCHIVE_SCHEMA,
                 "session": session.isoformat(),
                 "cutoff": capture_cutoff(session).isoformat(),
                 "tables": tables,
-                "raw": {name: self._raw(name, payload) for name, payload in files.items()},
+                "raw": {name: self._raw(name, payload) for name, payload in files.items()
+                        if name not in RESEARCH_FILES or name in approved},
+                **({"headline_dictionary": inputs.research.dictionary} if inputs.research.dictionary else {}),
                 **metadata,
             }
             for source in ("filings", "earnings", "options", "estimates"):
@@ -216,19 +300,24 @@ class Archive:
         manifest = self.publication(version)
         names = manifest["display_symbols"]
         tables = {}
+        research = ResearchInputs(
+            sources={name: manifest["sources"][name] for name in EXPORTS if name in manifest["sources"]},
+            dictionary=manifest.get("headline_dictionary", {}),
+        )
         with duckdb.connect(config={"threads": 2}) as connection:
-            for name, fields in TABLE_FIELDS.items():
+            for name, fields in (TABLE_FIELDS | {name: export.columns for name, export in EXPORTS.items()}).items():
                 paths = [str(self.root / path) for path in manifest["tables"].get(name, [])]
                 if paths:
                     frame = connection.read_parquet(paths, hive_partitioning=False).df()
                     if "symbol" in fields:
-                        frame["symbol"] = frame["security_id"].map(names)
-                    tables[name] = frame.reindex(columns=fields)
-                else:
+                        frame["symbol"] = frame["security_id"].map(names).fillna(frame["symbol"])
+                    target = research.tables if name in EXPORTS else tables
+                    target[name] = frame.reindex(columns=fields)
+                elif name not in EXPORTS:
                     tables[name] = pd.DataFrame(columns=fields)
         return Inputs(**tables, source=manifest["sources"]["prices"]["label"],
                       membership_source=manifest["sources"]["membership"]["label"],
-                      demo=manifest["synthetic"], stress_sources={
+                      demo=manifest["synthetic"], research=research, stress_sources={
                           name: source["label"] for name, source in manifest["sources"].get("stress", {}).items()
                       }, issuer_sources={name: manifest["sources"][name] for name in ("filings", "earnings")
                                          if name in manifest["sources"]}), manifest

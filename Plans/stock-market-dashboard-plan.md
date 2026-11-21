@@ -179,6 +179,8 @@ The stock workflow passed offline acceptance. The dashboard runs locally. Browse
 | Options and positioning | Start with chain quality and expected moves. Add OI changes from consecutive dated captures, volatility history as it matures, then estimated gamma, expiry splits, walls and flips. | Each panel passes its own data and calculation checks in section 5. A chain with no zero crossing and a newly watched stock both display intelligible results. |
 | Market and stock detail | Add sector rotation and market internals from dated constituents, financial and ownership history from dated releases, and intraday measures where suitable bars exist. Use section 9 to choose the next indicator. | Independently reproduce one example per added measure and confirm it was available on the historical date shown. |
 
+The research panels and dated export workflow are implemented. Live release depends on provider permissions, sample reconciliation and accumulated history for the historical comparisons. [Phase 5 implementation and verification](../CompletionLog/phase-5.md)
+
 ### Phase 6. Operate the dashboard and decide when to expand · ongoing
 
 - [ ] Review missed captures, stale sources, coverage by sector, storage growth and request usage. Recover available dates and record unrecoverable gaps.

@@ -1,6 +1,6 @@
 # FutureFinance
 
-A private, end-of-day U.S. market dashboard. It opens the latest published archive session when one is available. The bundled synthetic preview includes SPY and QQQ trend, 50- and 200-session breadth, volatility and credit, all 11 sector ETFs, and stock drilldowns with risk, business health and valuation.
+A private, end-of-day U.S. market dashboard. It opens the latest published archive session when one is available. The bundled synthetic preview includes SPY and QQQ trend, 50- and 200-session breadth, volatility and credit, all 11 sector ETFs, and stock drilldowns with risk, business health and valuation. Phase 5 adds market internals, sector rotation, headlines, options and deeper issuer research.
 
 ## Start on Windows
 
@@ -16,6 +16,8 @@ Open [FutureFinance](http://127.0.0.1:8501). The server listens on the loopback 
 On **Market**, the August 8, 2025 sample shows SPY up 0.84% with only 38 of 100 members above their 50-session average. To see a sector outperform during a decline, pick August 1, 2025 and open **Financials (XLF)** from the market view. The selected session and chart window stay in place as you navigate. Expand **Session sources and coverage** to inspect dates and available inputs.
 
 On August 8, open **Technology (XLK)** and select **AAPL**, or choose AAPL directly in **Stock**. The synthetic example shows a rising close and lower operating margin. Choose **RIVN** to see loss-making trailing earnings or **CRCL** to see how the dashboard handles a recent listing and an unknown sector. Expand **Dividend-adjusted index chart data** to see the plotted returns as a table.
+
+For Phase 5, open **Sector rotation** and **Seven-day headline tone** under Sector. Under AAPL Stock, open **Options, implied moves and positioning** to compare the straddle with the IV-based move and inspect the chain and dated open interest. CRCL shows the state for a symbol with no chain history.
 
 ## Try a local price export
 
@@ -60,11 +62,33 @@ The archives under `data/archive` contain the compressed source files, month-par
 - Optional `security_aliases.csv` has header `symbol,security_id,start,end`. Dates are ISO calendar dates. Start is inclusive, end is exclusive, and a blank end is open-ended. Give both ticker ranges the same ID for a rename and distinct IDs when a ticker is reused. Undeclared tickers use a ticker-derived ID.
 - Keep a whole bundle together when updating the inbox. A capture reads the supplied history as a bundle for that publication, so include the warmup history in each replacement.
 
+### Add Phase 5 research exports
+
+Put any of the following optional CSVs beside the bars. Use `data/inbox` for capture or `data` for a local preview. Add a corresponding entry under `research_sources` in `source.json` with a provider and coverage label and `"permitted": true` after verifying storage and display rights. For example, `"research_sources": {"options": {"label": "Provider, indicative options feed", "permitted": true}}`. An unconfigured or invalid export affects its own panel. Include ISO dates, explicit UTC or local offsets on timestamps, and blank cells for unavailable optional values.
+
+| File | Required columns | Optional columns and input definitions |
+| --- | --- | --- |
+| `options.csv` | `symbol,observed_at,contract,available_at,spot_at,spot,expiry,settlement_at,side,strike,deliverable,multiplier,quote_at,bid,ask` | `iv,delta,volume,oi,oi_session,rate,dividend_yield`. Provide decimal annualized IV, rate and dividend yield, signed delta, per-share USD quotes, and contract counts. Use `call` or `put`, and `standard`, `adjusted` or `unknown` deliverables. Keep the same underlying spot and times within a snapshot. Quote fields can be blank for a pre-open OI export and settlement or multiplier can be blank when unverified. OI needs its paired earlier effective session. |
+| `headlines.csv` | `symbol,story_id,source,available_at,issuer_id,published_at,title` | Use a stable issuer ID across share classes and a stable story ID across syndicated copies. Provide `headline_dictionary.csv` with `term,tone` and one `positive` or `negative` word per row. The headlines source entry also needs a `dictionary_label` identifying its version. |
+| `market_context.csv` | `session,series,available_at` | Supply `value` for `DGS10` in percent, `T10Y2Y` in percentage points or `DTWEXBGS` in index points. Supply matched `puts,calls` for `equity_volume`, `index_volume`, `equity_oi` or `index_oi`. |
+| `estimates.csv` | `symbol,period,kind,available_at,eps` | `target,analysts,released_at`. Use `consensus` or `actual`, the fiscal period end and USD EPS on the same per-share and accounting basis. Use `released_at` on actuals if the release predates the vendor timestamp, otherwise `available_at` must be the first release time. |
+| `insiders.csv` | `symbol,transaction_id,available_at,accession,cik,session,code,venue,shares,price` | Use the SEC acceptance time, transaction date, stable transaction ID across amendments, and USD price or a blank price. Use `open_market`, `private`, `other` or `unknown` after checking filing notes. SEC codes P and S also cover private transactions. [SEC Form 4 instructions](https://www.sec.gov/files/form4.pdf) |
+| `positioning.csv` | `symbol,session,metric,available_at,start,numerator,scope` | `denominator,denominator_scope,denominator_source`. Use end and start dates for the measured window and identify the numerator's market or facilities in `scope`. Use `short_float` with same-date `float`, `days_to_cover` with `consolidated_daily_average`, `ats_share` with same-week `consolidated_weekly`, and `off_exchange_short_share` with volume from the `same_facilities_daily`. [FINRA catalog](https://developer.finra.org/catalog) |
+| `intraday.csv` | `symbol,start_at,available_at,end_at,high,low,close,volume` | Use contiguous bars from the regular session, quoted USD bars and reported share volume. Identify the venue coverage in the source label. |
+
+Archive captures keep prior options and estimate observations under the same permitted source label. Include cumulative history in the other exports when earlier readings are needed. The application filters observations at the selected session's close-plus-30-minute cutoff. A snapshot that first becomes available later remains absent from that evening's replay. Keep pre-expiry chains timestamped before actual contract settlement for 0-day analysis. The one-standard-deviation move uses calendar days and remaining fractional days for same-day expirations.
+
+Use a documented endpoint and verify pagination, quote delays, contract terms and effective OI dates on the intended account before relying on live chains. Confirm terms for both the headline feed and dictionary before importing. [Alpaca option chain](https://docs.alpaca.markets/us/reference/optionchain) · [OCC open interest](https://www.theocc.com/market-data/market-data-reports/volume-and-open-interest/open-interest) · [Loughran–McDonald dictionary terms](https://sraf.nd.edu/loughranmcdonald-master-dictionary/)
+
+```powershell
+python -m future_finance.collect replay --version <run-id> --research --sector XLK --stock AAPL
+```
+
 ### Windows capture schedule
 
 Preview registration with `./scripts/Register-ArchiveTask.ps1 -WhatIf`. Run the script without `-WhatIf` to register it once the permitted exports are ready. Use `-Python` with the full path to the interpreter that has the project requirements installed. The task uses the current Windows user and needs that user to be signed in.
 
-The task checks for an 8:30 a.m. pre-open window, a window 30 minutes after the NYSE close, and a 6:30 p.m. late check, all in New York time. It logs an attempt only in a due window. The post-close and late windows ingest the local bundle, including issuer exports. The pre-open window records that it is waiting for a verified source. An abrupt stop can leave a run marked `started` in the log. Use `runs` to inspect the failed run and its `detail`, correct the source export, and use a manual `capture` to retry. After signing back in following a restart, check `runs` after the next due window, then use `replay` to verify its session and open that session in the dashboard.
+The task checks for an 8:30 a.m. pre-open window, a window 30 minutes after the NYSE close, and a 6:30 p.m. late check, all in New York time. It logs an attempt only in a due window. The post-close and late windows ingest the local bundle, including issuer exports. The pre-open window preserves permitted options snapshots with dated OI and records a waiting status when the export is missing. An abrupt stop can leave a run marked `started` in the log. Use `runs` to inspect the failed run and its `detail`, correct the source export, and use a manual `capture` to retry. After signing back in following a restart, check `runs` after the next due window, then use `replay` to verify its session and open that session in the dashboard.
 
 ### Back up and recover a session
 
@@ -72,7 +96,7 @@ With captures paused and idle, copy the entire `data/archive` directory to a dat
 
 To recover, close the dashboard, keep captures paused, rename the current archive aside, and copy the verified backup to `data/archive`. Reopen the dashboard and confirm the expected date and version. Re-enable scheduled capture after verification.
 
-See the [Phase 2 completion log](CompletionLog/phase-2.md) for archive verification, [Phase 3](CompletionLog/phase-3.md) for market and sector acceptance, and [Phase 4](CompletionLog/phase-4.md) for the stock checks and local launch status.
+See the [Phase 2 completion log](CompletionLog/phase-2.md) for archive verification, [Phase 3](CompletionLog/phase-3.md) for market and sector acceptance, [Phase 4](CompletionLog/phase-4.md) for local launch status, and [Phase 5](CompletionLog/phase-5.md) for research validation and live release checks.
 
 ## Check data access
 

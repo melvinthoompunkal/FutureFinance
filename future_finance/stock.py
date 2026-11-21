@@ -125,7 +125,9 @@ def peer_valuations(inputs: Inputs, members: pd.DataFrame, filings: pd.DataFrame
     for peer, bars in prices.groupby("symbol", sort=True):
         report = reports.loc[peer]
         value = valuation(report, bars, day)
-        values.append((peer, report.cik, value.pe, value.fcf_yield))
+        values.append((peer, report.cik, value.pe, value.fcf_yield, report.period,
+                       (day - report.period).days))
     # Pick one priced share class per issuer. The first ticker is deterministic.
-    return (pd.DataFrame(values, columns=["Symbol", "CIK", "Trailing P/E", "FCF yield (%)"])
+    return (pd.DataFrame(values, columns=["Symbol", "CIK", "Trailing P/E", "FCF yield (%)",
+                                          "Fiscal period", "Period age (calendar days)"])
             .dropna(subset=["Trailing P/E", "FCF yield (%)"], how="all").drop_duplicates("CIK").set_index("Symbol"))

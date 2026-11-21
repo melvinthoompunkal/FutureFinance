@@ -111,7 +111,7 @@ if publications:
         st.stop()
     st.info(f"Archived session from {inputs.source}. Version {manifest['version']} · {manifest['vintage'].capitalize()}.")
 elif inputs.demo:
-    st.info("Synthetic preview with sample prices, membership, volatility, credit and financial statements.")
+    st.info("Synthetic preview. Market, company and research data are illustrative.")
 else:
     st.info(f"Local price import from {inputs.source}.")
 universe = inputs.membership_source or "Membership unavailable"

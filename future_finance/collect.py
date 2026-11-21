@@ -12,6 +12,7 @@ import pandas as pd
 from . import analytics as calc
 from .archive import Archive
 from .market_calendar import scheduled_window
+from .research_replay import research_readings
 from .scope import BENCHMARK, NEW_YORK, SECTORS
 from .stock import FUNDS, business_health, filing_url, filings_as_of, next_earnings, price_risk, valuation
 
@@ -19,7 +20,8 @@ DATA = Path(__file__).resolve().parents[1] / "data"
 REPLAY_FORMULA_VERSION = 2
 
 
-def replay(archive: Archive, version: int, sector: str = "XLK", stock: str = "AAPL") -> dict:
+def replay(archive: Archive, version: int, sector: str = "XLK", stock: str = "AAPL", *,
+           include_research: bool = False) -> dict:
     inputs, manifest = archive.load(version)
     day = pd.Timestamp(manifest["session"])
     split = inputs.prices("split_close")
@@ -72,7 +74,7 @@ def replay(archive: Archive, version: int, sector: str = "XLK", stock: str = "AA
                 "trailing_pe": number(value.pe), "loss_making": bool(value.loss_making),
                 "fcf_yield_pct": number(value.fcf_yield),
             }
-    return {
+    result = {
         "version": version, "formula_version": REPLAY_FORMULA_VERSION,
         "session": manifest["session"], "vintage": manifest["vintage"],
         "market": {
@@ -88,6 +90,9 @@ def replay(archive: Archive, version: int, sector: str = "XLK", stock: str = "AA
                    "vs_spy_20_pct": number(sector_row["20 sessions"])},
         "stock": stock_data,
     }
+    if include_research:
+        result["research"] = research_readings(inputs, day, sector, stock)
+    return result
 
 
 def main() -> int:
@@ -106,6 +111,7 @@ def main() -> int:
     pick.add_argument("--version", type=int)
     inspect.add_argument("--sector", choices=SECTORS, default="XLK")
     inspect.add_argument("--stock", default="AAPL", type=str.upper)
+    inspect.add_argument("--research", action="store_true", help="Include Phase 5 readings.")
     args = parser.parse_args()
     archive = Archive(args.archive)
     try:
@@ -115,7 +121,7 @@ def main() -> int:
             version = args.version if args.version is not None else archive.published_sessions().get(args.session)
             if version is None:
                 raise ValueError(f"No publication exists for {args.session}.")
-            result = replay(archive, version, args.sector, args.stock)
+            result = replay(archive, version, args.sector, args.stock, include_research=args.research)
         elif args.command == "tick":
             now = datetime.now(NEW_YORK)
             window = scheduled_window(now)

@@ -4,6 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from . import analytics as calc, charts
+from . import research_views
 from .inputs import Inputs
 from .issuer_inputs import FINANCIAL_FIELDS
 from .scope import BENCHMARK, NEW_YORK
@@ -88,10 +89,9 @@ def stock(session: Session, ticker: str) -> None:
             else:
                 _issuer_export_status(session, "earnings")
     _risk(session, ticker, split)
-    if fund:
-        return
-
-    _business(session, ticker, members, sector_etf, move)
+    if not fund:
+        _business(session, ticker, members, sector_etf, move)
+    research_views.stock(session, ticker, split, fund)
 
 
 def _relative_reading(session: Session, ticker: str, benchmark: str) -> None:
