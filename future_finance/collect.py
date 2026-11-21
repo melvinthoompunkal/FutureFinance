@@ -13,9 +13,10 @@ from . import analytics as calc
 from .archive import Archive
 from .market_calendar import scheduled_window
 from .scope import BENCHMARK, NEW_YORK, SECTORS
+from .stock import FUNDS, business_health, filing_url, filings_as_of, next_earnings, price_risk, valuation
 
 DATA = Path(__file__).resolve().parents[1] / "data"
-REPLAY_FORMULA_VERSION = 1
+REPLAY_FORMULA_VERSION = 2
 
 
 def replay(archive: Archive, version: int, sector: str = "XLK", stock: str = "AAPL") -> dict:
@@ -33,6 +34,44 @@ def replay(archive: Archive, version: int, sector: str = "XLK", stock: str = "AA
     def number(value, digits: int = 6) -> float | None:
         return None if pd.isna(value) else round(float(value), digits)
 
+    stock_data = {
+        "symbol": stock,
+        "change_pct": number(calc.change(stock_prices, 1).loc[day]),
+        "vs_spy_20_pct": number(calc.change(calc.relative(total, stock), 20).loc[day]),
+        "risk": {label: number(value) for label, value in
+                 price_risk(inputs, stock, stock_prices, split.index[-60:]).items()},
+    }
+    sector_etf = inputs.sector_on(stock, day)
+    stock_data["sector_etf"] = sector_etf
+    if sector_etf:
+        stock_data["vs_sector_20_pct"] = number(calc.change(calc.relative(total, stock, sector_etf), 20).loc[day])
+        stock_data["sector_vs_spy_20_pct"] = number(calc.change(calc.relative(total, sector_etf), 20).loc[day])
+    if stock not in FUNDS:
+        event = next_earnings(inputs.earnings, stock, day)
+        stock_data["next_earnings"] = None if event is None else {
+            "date": event.event_date.date().isoformat(), "status": event.status,
+            "available_at": event.available_at.tz_convert(NEW_YORK).isoformat(),
+        }
+        stock_data["filing"] = None
+        filings = filings_as_of(inputs.filings, day)
+        if stock in filings.index:
+            filing = filings.loc[stock]
+            health = business_health(filing)
+            value = valuation(filing, inputs.bars_for(stock), day)
+            operating = filing.basis == "operating"
+            stock_data["filing"] = {
+                "period": filing.period.date().isoformat(), "form": filing.form, "basis": filing.basis,
+                "accession": filing.accession, "url": filing_url(filing),
+                "available_at": filing.available_at.tz_convert(NEW_YORK).isoformat(),
+                "revenue_yoy_pct": number(health.growth),
+                "operating_margin_pct": number(health.margin) if operating else None,
+                "operating_margin_yoy_pp": number(health.margin_change) if operating else None,
+                "trailing_fcf_usd": number(health.fcf) if operating else None,
+                "gross_debt_ebitda": number(health.debt_to_ebitda) if operating else None,
+                "interest_coverage": number(health.coverage) if operating else None,
+                "trailing_pe": number(value.pe), "loss_making": bool(value.loss_making),
+                "fcf_yield_pct": number(value.fcf_yield),
+            }
     return {
         "version": version, "formula_version": REPLAY_FORMULA_VERSION,
         "session": manifest["session"], "vintage": manifest["vintage"],
@@ -47,11 +86,7 @@ def replay(archive: Archive, version: int, sector: str = "XLK", stock: str = "AA
         },
         "sector": {"symbol": sector, "change_20_pct": number(sector_row["Absolute, 20 sessions"]),
                    "vs_spy_20_pct": number(sector_row["20 sessions"])},
-        "stock": {
-            "symbol": stock,
-            "change_pct": number(calc.change(stock_prices, 1).loc[day]),
-            "vs_spy_20_pct": number(calc.change(calc.relative(total, stock), 20).loc[day]),
-        },
+        "stock": stock_data,
     }
 
 

@@ -48,9 +48,11 @@ class PreviewTests(unittest.TestCase):
         self.assertTrue(any("operating margin was lower" in item.value for item in app.markdown))
         self.assertEqual(next(metric.delta for metric in app.metric if metric.label == "Operating margin"),
                          "-2.00 pp YoY")
+        self.assertTrue(any("XLK peer median" in note.value and "2 eligible" in note.value for note in app.caption))
 
         app.selectbox(key="stock_choice_selector").select("RIVN").run()
         self.assertIn("Loss-making", [metric.value for metric in app.metric])
+        self.assertTrue(any("RIVN" in text.value and "XLY over 20 sessions" in text.value for text in app.markdown))
         app.selectbox[0].set_value(pd.Timestamp("2025-08-05")).run()
         self.assertTrue(any("selected cutoff" in item.value for item in app.info))
         app.selectbox(key="stock_choice_selector").select("CRCL").run()
@@ -72,6 +74,25 @@ stock(Session(inputs, split, inputs.prices("total_return_close"), inputs.prices(
         self.assertEqual(next(metric.value for metric in app.metric if metric.label == "Trailing P/E"),
                          "Unavailable")
         self.assertFalse(app.exception)
+
+    def test_market_opens_a_sector_that_led_while_falling(self):
+        app = self._app()
+        day = pd.Timestamp("2025-08-01")
+        app.selectbox[0].set_value(day).run()
+        app.selectbox[1].set_value(20).run()
+        app.selectbox(key="market_sector").select("XLF").run()
+        next(button for button in app.button if button.label == "Open sector detail").click().run()
+        self.assertFalse(app.exception)
+        self.assertEqual(app.selectbox(key="sector_choice_selector").value, "XLF")
+        self.assertEqual((app.selectbox[0].value, app.selectbox[1].value), (day, 20))
+        self.assertTrue(any("XLF fell (-0.17%)" in text.value and "outperformed SPY (+0.07%" in text.value
+                            for text in app.markdown))
+        self.assertEqual(len(app.dataframe[0].value), 11)
+        self.assertTrue(any("eligible members" in note.value and "outperformed SPY" in note.value
+                            for note in app.caption))
+        app.radio(key="view").set_value("Market").run()
+        app.radio(key="view").set_value("Sector").run()
+        self.assertEqual(app.selectbox(key="sector_choice_selector").value, "XLF")
 
     def test_csv_preserves_adjustment_basis_and_dated_missing_data(self):
         self._bars("2025-12-04,SPY,100,100,100,1000\n"
@@ -99,16 +120,25 @@ stock(Session(inputs, split, inputs.prices("total_return_close"), inputs.prices(
                 with self.assertRaisesRegex(ValueError, message):
                     import_bundle(self.data)
 
+    def test_local_import_keeps_omitted_exchange_session_as_a_gap(self):
+        self._bars("2025-12-04,SPY,100,100,100,1000\n2025-12-08,SPY,101,101,101,1000\n")
+        split = import_bundle(self.data).prices("split_close")["SPY"]
+        self.assertTrue(pd.isna(split.loc["2025-12-05"]))
+        self.assertTrue(pd.isna(change(split, 1).loc["2025-12-08"]))
+
     def test_import_labels_missing_series_and_shows_concentration_proxy(self):
         self._bars("2025-12-04,SPY,100,100,100,1000\n"
                    "2025-12-05,SPY,101,101,101,1200\n"
                    "2025-12-04,RSP,60,60,60,300\n"
                    "2025-12-05,RSP,61,61,61,330\n"
+                   "2025-12-05,HYG,80,80,80,100\n"
+                   "2025-12-05,IEF,90,90,90,100\n"
                    "2025-12-05,AAPL,75,75,,100\n")
         app = self._app()
         self.assertIn("Membership unavailable", [metric.value for metric in app.metric])
         self.assertTrue(any("QQQ" in note.value and "No dividend-adjusted" in note.value for note in app.caption))
         self.assertTrue(any("Concentration proxy index" in item.label for item in app.expander))
+        self.assertIn("HYG / IEF credit proxy", [metric.label for metric in app.metric])
         app.radio(key="view").set_value("Stock").run()
         self.assertTrue(any("AAPL" in note.value and "No dividend-adjusted" in note.value for note in app.caption))
         self.assertFalse(app.exception)

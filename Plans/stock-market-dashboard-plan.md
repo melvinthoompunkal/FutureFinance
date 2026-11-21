@@ -153,17 +153,21 @@ The local visualization and frontend guides inform chart choice and accessibilit
 ### Phase 3. Build the market and sector views · 4–7 working days
 
 - [ ] Expand validated daily prices to the breadth universe and all 11 sector ETFs. Calculate market trend, breadth, volatility and credit using section 2. Display the eligible member count and the date for each source.
-- [ ] Rank the sectors, show absolute and relative returns, and connect each sector to its member table. Preserve the selected date and window during navigation.
-- [ ] Independently recalculate one sector rank and one breadth fraction. Inspect a session when the index rose on narrow participation, a sector that led while falling, and a missing membership file.
+- [x] Rank the sectors, show absolute and relative returns, and connect each sector to its member table. Preserve the selected date and window during navigation.
+- [x] Independently recalculate one sector rank and one breadth fraction. Inspect a session when the index rose on narrow participation, a sector that led while falling, and a missing membership file.
+
+The market and sector calculations, source dates, and coverage passed the offline acceptance checks. The first item stays open for the verified live universe and stress exports. [Phase 3 implementation and acceptance results](../CompletionLog/phase-3.md)
 
 **Done when** the overview and sector detail explain those cases using the underlying values and identify which breadth or proxy series the reader is seeing.
 
 ### Phase 4. Build stock health, test the workflow and launch locally · 5–8 working days
 
-- [ ] Connect the watchlist and sector members to stock detail. Add the benchmark comparisons, risk measures, filing-based financials, valuation and earnings status in section 2.
-- [ ] Reconcile two companies' figures to their filings. Exercise negative earnings, a short trading history, an unknown sector and an amended filing. Check the displayed dates as well as the numbers.
+- [x] Connect the watchlist and sector members to stock detail. Add the benchmark comparisons, risk measures, filing-based financials, valuation and earnings status in section 2.
+- [x] Reconcile two companies' figures to their filings. Exercise negative earnings, a short trading history, an unknown sector and an amended filing. Check the displayed dates as well as the numbers.
 - [ ] Run all five acceptance scenarios in section 8. Check keyboard access, narrow-screen charts, cached load time, an offline optional feed and backup recovery.
 - [ ] Install the dashboard and scheduler on the intended machine. After a restart, verify the next capture and open its published session. Record how to start the dashboard, edit the watchlist, inspect a failed run and restore the last good snapshot.
+
+The stock workflow passed offline acceptance. The dashboard runs locally. Browser accessibility and narrow-screen checks, Task Scheduler registration, and a live capture after a machine restart remain open. [Phase 4 implementation and acceptance results](../CompletionLog/phase-4.md)
 
 **Done when** a reader can go from market to sector to stock on one date, trace a claim to its evidence, and reopen the published result after a restart.
 

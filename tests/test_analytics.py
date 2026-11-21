@@ -5,6 +5,7 @@ import pandas as pd
 
 from future_finance.analytics import breadth_history, change, sector_ranking, trend, moving_average_gaps
 from future_finance.demo import make_demo
+from future_finance.scope import SECTORS
 
 
 class PhaseOneScenarios(unittest.TestCase):
@@ -18,7 +19,16 @@ class PhaseOneScenarios(unittest.TestCase):
         dates = self.split.index[-6:]
         readings = breadth_history(self.inputs, self.split, dates)[50]
         latest = readings[dates[-1]]
-        self.assertEqual((latest.above, latest.eligible, latest.expected), (38, 100, 100))
+        symbols = self.inputs.members_on(dates[-1])["symbol"]
+        above = 0
+        eligible = 0
+        for symbol in symbols:
+            last_fifty = self.split[symbol].iloc[-50:].tolist()
+            if len(last_fifty) == 50 and all(pd.notna(value) for value in last_fifty):
+                eligible += 1
+                above += last_fifty[-1] > sum(last_fifty) / 50
+        self.assertEqual((latest.above, latest.eligible, latest.expected), (above, eligible, len(symbols)))
+        self.assertEqual((above, eligible), (38, 100))
         self.assertEqual(latest.label, "Narrow")
         self.assertEqual(latest.percent - readings[dates[0]].percent, -7)
         self.assertAlmostEqual(change(self.split["SPY"], 1).iloc[-1], 0.84, places=2)
@@ -38,11 +48,12 @@ class PhaseOneScenarios(unittest.TestCase):
 
     def test_sector_rank_uses_ratio_and_recent_listing_stays_incomplete(self):
         sector = sector_ranking(self.total)
-        self.assertEqual(sector.index[0], "XLK")
-        start, end = self.total.iloc[[-21, -1]].itertuples(index=False, name=None)
-        xlk, spy = (self.total.columns.get_loc(ticker) for ticker in ("XLK", "SPY"))
-        expected = ((end[xlk] / end[spy]) / (start[xlk] / start[spy]) - 1) * 100
-        self.assertAlmostEqual(sector.loc["XLK", "20 sessions"], expected)
+        start, end = (self.total.iloc[index] for index in (-21, -1))
+        expected = {ticker: 100 * (end[ticker] * start.SPY / (start[ticker] * end.SPY) - 1)
+                    for ticker in SECTORS}
+        self.assertEqual(sector.index.tolist(), sorted(expected, key=expected.get, reverse=True))
+        self.assertEqual(sector.at["XLK", "Rank"], 1)
+        self.assertAlmostEqual(sector.at["XLK", "20 sessions"], expected["XLK"])
         gaps = moving_average_gaps(self.split["CRCL"])
         self.assertTrue(pd.isna(gaps[200]))
         self.assertEqual(trend(gaps), "Incomplete history")

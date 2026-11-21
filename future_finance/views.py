@@ -1,12 +1,13 @@
 from dataclasses import dataclass
-from datetime import time
 
 import pandas as pd
 import streamlit as st
 
 from . import analytics as calc, charts
 from .inputs import Inputs
-from .scope import BENCHMARK, COMPARISON, NEW_YORK, SECTORS
+from .issuer_inputs import FINANCIAL_FIELDS
+from .scope import BENCHMARK, NEW_YORK
+from .stock import FUNDS, business_health, filing_url, filings_as_of, next_earnings, peer_valuations, price_risk, valuation
 
 
 def signed(value: float | None, suffix: str = "%") -> str:
@@ -20,24 +21,14 @@ class Session:
     total: pd.DataFrame
     close: pd.DataFrame
     dates: pd.DatetimeIndex
+    manifest: dict | None = None
 
     @property
     def day(self) -> pd.Timestamp:
         return self.dates[-1]
 
-    def metric(self, name: str, series: pd.Series, window: int) -> None:
-        st.metric(name, signed(calc.change(series, window).iloc[-1]))
 
-
-def _breadth_chart(history: dict, dates: pd.DatetimeIndex) -> None:
-    values = pd.DataFrame({
-        f"{window}-session average": {day: reading.percent for day, reading in series.items()}
-        for window, series in history.items()
-    }).reindex(dates)
-    charts.lines(values, "Members above average (%)", height=155, domain=[0, 100])
-
-
-def _return_chart(session: Session, tickers: list[str]) -> None:
+def return_chart(session: Session, tickers: list[str]) -> None:
     prices = session.total.loc[session.dates]
     available = prices.dropna(axis=1, how="all").columns
     missing = list(dict.fromkeys(ticker for ticker in tickers if ticker not in available))
@@ -47,160 +38,38 @@ def _return_chart(session: Session, tickers: list[str]) -> None:
     if indexed.empty and indexed.shape[1]:
         st.info("The available price series have no overlapping session in this window.")
         return
-    charts.lines(indexed, "Dividend-adjusted index", index_baseline=True)
-
-
-def _breadth_evidence(history: dict, day: pd.Timestamp, earlier: pd.Timestamp | None) -> None:
-    for window, readings in history.items():
-        reading = readings[day]
-        previous = readings.get(earlier)
-        percent = reading.percent
-        text = f"{percent:.0f}% · {reading.label}" if percent is not None else reading.label
-        st.metric(f"Above {window}-session average", text)
-        if reading.expected:
-            details = f"{reading.above} above · {reading.eligible} of {reading.expected} eligible"
-            if previous is not None and previous.percent is not None and percent is not None:
-                details += f" · {percent - previous.percent:+.0f} pp in 5 sessions"
-            st.caption(details)
-
-
-def _stress(session: Session) -> None:
-    st.subheader("Volatility and credit")
-    if session.inputs.stress.empty:
-        st.caption("VIX, VIX3M and high-yield spreads are unavailable in this import.")
-        proxy = calc.relative(session.total, "HYG", "IEF")
-        if proxy.notna().any():
-            session.metric("HYG / IEF credit proxy · 20 sessions", proxy, 20)
-        return
-    available = session.inputs.stress.loc[session.inputs.stress["available_on"].le(session.day)]
-    if available.empty:
-        st.caption("No stress readings published by this session.")
-        return
-    latest = available.iloc[-1]
-    left, middle, right = st.columns(3)
-    left.metric("VIX close", f"{latest['VIX']:.2f}")
-    middle.metric("VIX / VIX3M", f"{latest['VIX'] / latest['VIX3M']:.2f}×")
-    shift = available["OAS"].diff(20).iloc[-1] * 100
-    right.metric("High-yield spread", f"{latest['OAS'] * 100:.0f} bp", signed(shift, " bp over 20 sessions"),
-                 delta_color="off")
-    st.caption(f"Observation dated {latest.name:%b %d, %Y}.")
-
-
-def market(session: Session) -> None:
-    st.title("U.S. market")
-    history = calc.breadth_history(session.inputs, session.split, session.split.index[-max(6, len(session.dates)):])
-    gaps = calc.moving_average_gaps(session.split[BENCHMARK])
-    move = calc.change(session.split[BENCHMARK], 1).iloc[-1]
-    reading = history[50][session.day]
-    lead = f"SPY moved {signed(move)} on the session." if pd.notna(move) else "SPY session change is unavailable."
-    if reading.label == "Narrow":
-        lead += f" Only {reading.percent:.0f}% of eligible members are above their 50-session average."
-    elif reading.percent is not None:
-        lead += f" {reading.percent:.0f}% of eligible members are above their 50-session average."
-    st.write(lead)
-
-    main, evidence = st.columns([3, 1.45], gap="large")
-    with main:
-        st.subheader("Benchmark performance")
-        _return_chart(session, [BENCHMARK, COMPARISON])
-        st.subheader("Market participation")
-        if reading.expected:
-            _breadth_chart(history, session.dates)
-        else:
-            st.caption("A dated membership snapshot is unavailable for this session.")
-            ratio = calc.relative(session.total, "RSP").loc[session.dates]
-            if ratio.notna().any():
-                charts.lines((ratio / ratio.dropna().iloc[0] * 100).to_frame("RSP / SPY"),
-                             "Concentration proxy index", height=155, index_baseline=True)
-                st.caption("RSP compares equal-weight performance with cap-weight SPY.")
-    with evidence:
-        st.subheader("Evidence at the close")
-        st.metric("SPY trend", calc.trend(gaps))
-        st.caption(f"50-session gap {signed(gaps[50])} · 200-session gap {signed(gaps[200])}")
-        sma = session.split[BENCHMARK].rolling(200).mean()
-        st.caption(f"200-session average · {signed(calc.change(sma, 20).iloc[-1])} in 20 sessions")
-        if COMPARISON in session.split:
-            qqq_trend = calc.trend(calc.moving_average_gaps(session.split[COMPARISON]))
-            st.caption(f"QQQ trend · {qqq_trend}")
-        earlier = session.split.index[-6] if len(session.split) > 5 else None
-        _breadth_evidence(history, session.day, earlier)
-    _stress(session)
-
-
-def sector(session: Session, chosen: str, open_stock) -> None:
-    st.title("Sector leadership")
-    ranking = calc.sector_ranking(session.total)
-    left, right = st.columns([1, 1.5], gap="large")
-    with left:
-        st.subheader("20 sessions vs. SPY")
-        charts.sector_bars(ranking)
-    with right:
-        st.subheader("Relative and absolute returns")
-        st.dataframe(ranking, width="stretch", column_config={
-            column: st.column_config.NumberColumn(format="%+.2f%%")
-            for column in ranking.columns if column != "Sector"
-        })
-    st.subheader(f"{SECTORS[chosen]} ({chosen})")
-    latest = ranking.loc[chosen, "20 sessions"]
-    absolute = ranking.loc[chosen, "Absolute, 20 sessions"]
-    st.write(f"Over 20 sessions, {chosen} returned {signed(absolute)} and moved {signed(latest)} relative to SPY."
-             if pd.notna(latest) else f"{chosen} needs aligned dividend-adjusted closes 20 sessions apart.")
-    historic = calc.breadth_history(session.inputs, session.split, session.dates, chosen)
-    main, evidence = st.columns([3, 1.45], gap="large")
-    with main:
-        ratio = calc.relative(session.total, chosen).loc[session.dates].dropna()
-        if not ratio.empty:
-            charts.lines((ratio / ratio.iloc[0] * 100).reindex(session.dates).to_frame(f"{chosen} / SPY"),
-                         "Relative performance index", index_baseline=True)
-        if historic[50][session.day].expected:
-            _breadth_chart(historic, session.dates)
-    with evidence:
-        earlier = session.dates[-6] if len(session.dates) > 5 else None
-        _breadth_evidence(historic, session.day, earlier)
-
-    members = session.inputs.members_on(session.day)
-    symbols = members.loc[members["sector_etf"].eq(chosen), "symbol"].tolist()
-    if not symbols:
-        return
-    ratios = session.total.reindex(columns=symbols).div(session.total[BENCHMARK], axis="index")
-    moves = calc.change(ratios, 20).iloc[-1].sort_values(ascending=False)
-    count = int(moves.count())
-    if count:
-        st.caption(f"{int(moves.gt(0).sum())} of {count} eligible members outperformed SPY over 20 sessions. "
-                   f"{count} of {len(symbols)} members had comparable prices.")
-    with st.expander("Member returns"):
-        st.dataframe(moves.round(2).to_frame("20-session return vs. SPY (%)"), width="stretch")
-    member = st.selectbox("Sector member", moves.index, key=f"member_{chosen}")
-    st.button(f"Open {member} stock detail", on_click=open_stock, args=(member,))
+    charts.lines(indexed.reindex(session.dates), "Dividend-adjusted index", index_baseline=True)
 
 
 def stock(session: Session, ticker: str) -> None:
-    st.title(f"{ticker} stock detail")
-    if ticker not in session.close:
-        st.info(f"No bars for {ticker} in this dataset.")
-        return
+    fund = ticker in FUNDS
+    st.title(f"{ticker} {'fund' if fund else 'stock'} detail")
     members = session.inputs.members_on(session.day).set_index("symbol")
-    sector_etf = members["sector_etf"].get(ticker)
-    if ticker == "RIVN" and session.inputs.demo:
-        sector_etf = "XLY"
-    tickers = [ticker, sector_etf, BENCHMARK] if pd.notna(sector_etf) else [ticker, BENCHMARK]
-    history = session.close[ticker]
-    last_close = history.iloc[-1]
-    move = calc.change(session.split[ticker], 1).iloc[-1]
+    sector_etf = session.inputs.sector_on(ticker, session.day)
+    tickers = [ticker, sector_etf, BENCHMARK] if sector_etf else [ticker, BENCHMARK]
+    split = session.split.get(ticker, pd.Series(index=session.split.index, dtype=float))
+    last_close = session.close[ticker].iloc[-1] if ticker in session.close else float("nan")
+    move = calc.change(split, 1).iloc[-1]
+    event = next_earnings(session.inputs.earnings, ticker, session.day) if not fund else None
     main, evidence = st.columns([3, 1.45], gap="large")
     with main:
-        st.subheader("Performance against peers")
-        _return_chart(session, tickers)
-        if pd.isna(sector_etf):
+        st.subheader("Relative performance", anchor="relative-performance")
+        return_chart(session, tickers)
+        if sector_etf is None and not fund:
             st.caption("Sector mapping is unavailable for this stock on the selected session.")
-        else:
-            sector_move = calc.change(calc.relative(session.total, ticker, sector_etf), 20).iloc[-1]
-            st.caption(f"20 sessions vs. {sector_etf} · {signed(sector_move)}")
+        if sector_etf:
+            _relative_reading(session, ticker, sector_etf)
+            _relative_reading(session, sector_etf, BENCHMARK)
+        if ticker != BENCHMARK:
+            _relative_reading(session, ticker, BENCHMARK)
     with evidence:
         st.subheader("Price at the close")
         st.metric("Quoted close", f"${last_close:,.2f}" if pd.notna(last_close) else "Unavailable")
+        if pd.isna(last_close) and ticker in session.close:
+            latest = session.close[ticker].last_valid_index()
+            if latest is not None:
+                st.caption(f"Last available quoted close was {latest:%b %d, %Y}.")
         st.metric("Session change", signed(move))
-        split = session.split[ticker]
         gaps = calc.moving_average_gaps(split)
         st.metric("Price trend", calc.trend(gaps))
         st.caption("Distance from moving averages · " + " · ".join(
@@ -208,31 +77,131 @@ def stock(session: Session, ticker: str) -> None:
         ))
         if split.tail(200).count() < 200:
             st.caption(f"{split.tail(200).count()} of 200 split-adjusted closes available.")
-        session.metric("20 sessions vs. SPY", calc.relative(session.total, ticker), 20)
-
-    st.subheader("Business health")
-    filings = session.inputs.filings
-    if not filings.empty:
-        cutoff = pd.Timestamp.combine(session.day.date(), time(16, 30)).tz_localize(NEW_YORK)
-        filings = filings.loc[filings["symbol"].eq(ticker) & filings["available_at"].le(cutoff)]
-    if filings.empty:
-        st.info("No verified financial statement is available in this dataset by the selected cutoff.")
+        if not fund:
+            label = event.event_date.strftime("%b %d, %Y") if event is not None else "Unknown"
+            st.metric("Next earnings", label)
+            if event is not None:
+                source = session.inputs.issuer_sources.get("earnings", {}).get("label", "Synthetic calendar")
+                st.caption(f"{event.status.capitalize()} · {source} · {_publication_label(event.available_at)}")
+                if pd.notna(event.source_url):
+                    st.link_button("Open earnings announcement", event.source_url)
+            else:
+                _issuer_export_status(session, "earnings")
+    _risk(session, ticker, split)
+    if fund:
         return
-    filing = filings.sort_values(["period", "available_at"]).iloc[-1]
-    margin = filing.operating_income / filing.revenue * 100
-    prior_margin = filing.prior_operating_income / filing.prior_revenue * 100
-    growth = (filing.revenue / filing.prior_revenue - 1) * 100
-    if move > 0 and margin < prior_margin:
+
+    _business(session, ticker, members, sector_etf, move)
+
+
+def _relative_reading(session: Session, ticker: str, benchmark: str) -> None:
+    relative = calc.change(calc.relative(session.total, ticker, benchmark), calc.SECTOR_WINDOW).iloc[-1]
+    if pd.isna(relative):
+        st.caption(f"{ticker} vs. {benchmark} needs common adjusted closes 20 sessions apart.")
+    else:
+        action = "outperformed" if relative > 0 else "trailed" if relative < 0 else "matched"
+        st.write(f"{ticker} {action} {benchmark} over 20 sessions ({signed(relative)} relative).")
+
+
+def _risk(session: Session, ticker: str, split: pd.Series) -> None:
+    st.subheader("Risk and trading activity")
+    values = price_risk(session.inputs, ticker, split, session.dates)
+    columns = st.columns(3)
+    for index, (label, value) in enumerate(values.items()):
+        if label == "Relative volume (20)":
+            formatted = f"{value:.2f}×" if pd.notna(value) else "Unavailable"
+        elif label.startswith("Drawdown") or label.startswith("Distance"):
+            formatted = signed(value)
+        else:
+            formatted = f"{value:.2f}%" if pd.notna(value) else "Unavailable"
+        columns[index % len(columns)].metric(label, formatted)
+    with st.expander("Price sources and calculation windows"):
+        st.write(f"Daily prices from {session.inputs.source} through {session.day:%b %d, %Y}.")
+        st.write("The 14-session average true range uses split-adjusted highs, lows and previous closes. "
+                 "Realized volatility annualizes the standard deviation of daily log returns. Drawdown uses "
+                 "the highest split-adjusted close within the selected window.")
+        st.write("The 52-week high requires 252 split-adjusted intraday highs. Relative volume compares the "
+                 "selected session with the preceding 20 sessions on a consistent share basis.")
+
+
+def _publication_label(stamp: pd.Timestamp) -> str:
+    return f"Available {stamp.tz_convert(NEW_YORK):%b %d, %Y at %I:%M:%S %p ET}"
+
+
+def _issuer_export_status(session: Session, dataset: str) -> None:
+    source = session.inputs.issuer_sources.get(dataset, {})
+    if source.get("status") == "invalid export":
+        st.caption(source["detail"])
+
+
+def _business(session: Session, ticker: str, members: pd.DataFrame, sector_etf: str | None, move: float) -> None:
+    st.subheader("Business health", anchor="business-health")
+    filings = filings_as_of(session.inputs.filings, session.day)
+    if ticker not in filings.index:
+        st.info("No financial statement is available in this dataset by the selected cutoff.")
+        _issuer_export_status(session, "filings")
+        return
+    filing = filings.loc[ticker]
+    health = business_health(filing)
+    if filing.basis == "operating" and move > 0 and health.margin_change < 0:
         st.write("The stock rose on the session while operating margin was lower year over year.")
-    revenue_col, margin_col, cash_col, pe_col = st.columns(4)
-    revenue_col.metric("Quarterly revenue YoY", signed(growth))
-    margin_col.metric("Operating margin", f"{margin:.1f}%", signed(margin - prior_margin, " pp YoY"),
-                      delta_color="off")
-    cash_col.metric("Trailing free cash flow", f"${(filing.ttm_cfo - filing.ttm_capex) / 1000:,.1f}B")
-    pe = "Unavailable"
-    if filing.ttm_eps < 0:
-        pe = "Loss-making"
-    elif filing.ttm_eps > 0 and pd.notna(last_close):
-        pe = f"{last_close / filing.ttm_eps:.1f}×"
-    pe_col.metric("Trailing P/E", pe)
-    st.caption(f"Demo period ended {filing.period}. Available {filing.available_at:%b %d, %Y at %I:%M %p ET}.")
+    elif filing.basis == "operating" and pd.notna(health.growth) and pd.notna(health.margin_change):
+        revenue = "grew" if health.growth > 0 else "fell" if health.growth < 0 else "was unchanged"
+        margin = "rose" if health.margin_change > 0 else "fell" if health.margin_change < 0 else "was unchanged"
+        st.write(f"Revenue {revenue} and operating margin {margin} year over year.")
+
+    def ratio(value: float) -> str:
+        return f"{value:.2f}×" if pd.notna(value) else "Unavailable"
+
+    price_bars = session.inputs.bars_for(ticker)
+    value = valuation(filing, price_bars, session.day)
+    revenue_col, margin_col, cash_col = st.columns(3)
+    revenue_col.metric("Quarterly revenue YoY", signed(health.growth))
+    if filing.basis == "operating":
+        margin_col.metric("Operating margin", f"{health.margin:.1f}%" if pd.notna(health.margin) else "Unavailable",
+                          signed(health.margin_change, " pp YoY") if pd.notna(health.margin_change) else None,
+                          delta_color="off")
+        fcf = f"{'−' if health.fcf < 0 else ''}${abs(health.fcf) / 1e9:,.2f}B" if pd.notna(health.fcf) else "Unavailable"
+        cash_col.metric("Trailing free cash flow", fcf)
+        revenue_col.metric("Gross debt / EBITDA", ratio(health.debt_to_ebitda))
+        margin_col.metric("Interest coverage", ratio(health.coverage))
+    else:
+        margin_col.caption("Operating margin, cash flow and leverage comparisons are inapplicable for this "
+                           "reporting basis.")
+
+    source = session.inputs.issuer_sources.get("filings", {}).get("label", "Synthetic filing" if session.inputs.demo
+                                                                 else "SEC EDGAR")
+    st.caption(f"{source} · {filing.form} · Period ended {filing.period:%b %d, %Y}. "
+               f"{_publication_label(filing.available_at)}.")
+    url = filing_url(filing)
+    if url:
+        st.link_button("Open source filing", url)
+    with st.expander("Reported values and definitions"):
+        labels = ["Quarterly revenue (USD)", "Prior-year quarterly revenue (USD)", "Operating income (USD)",
+                  "Prior-year operating income (USD)", "Trailing operating cash flow (USD)",
+                  "Trailing capital expenditure (USD)", "Trailing diluted EPS (USD per share)",
+                  "Gross interest-bearing debt (USD)", "Trailing EBITDA (USD)", "Trailing EBIT (USD)",
+                  "Trailing interest expense (USD)"]
+        reported = filing[FINANCIAL_FIELDS].set_axis(labels).rename("Reported value").to_frame()
+        reported["Reported value"] = reported["Reported value"].astype(float)
+        st.dataframe(reported, width="stretch", column_config={"Reported value": st.column_config.NumberColumn(
+            format="localized")})
+        st.caption("Free cash flow subtracts capital expenditure from operating cash flow. Leverage divides "
+                   "gross debt by positive trailing EBITDA. Interest coverage divides trailing EBIT by interest expense.")
+
+    st.subheader("Valuation")
+    pe, cash = st.columns(2)
+    pe.metric("Trailing P/E", "Inapplicable" if filing.basis == "reit" else
+              "Loss-making" if value.loss_making else ratio(value.pe))
+    cash.metric("Free cash flow yield", signed(value.fcf_yield) if filing.basis == "operating" else "Inapplicable")
+    if sector_etf:
+        peers = peer_valuations(session.inputs, members, filings, ticker, filing, sector_etf, session.day)
+        for column, measure, formatter in ((pe, "Trailing P/E", ratio), (cash, "FCF yield (%)", signed)):
+            series = peers[measure].dropna()
+            median = formatter(series.median()) if len(series) else "Unavailable"
+            column.caption(f"{sector_etf} peer median {median} · {len(series)} eligible")
+        if len(peers):
+            with st.expander("Comparable sector valuations"):
+                st.dataframe(peers.drop(columns="CIK").round(2), width="stretch")
+    st.caption("P/E uses positive trailing diluted EPS on the quoted share basis. Free cash flow yield uses "
+               "trailing free cash flow and same-session market capitalization.")

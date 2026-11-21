@@ -13,12 +13,14 @@ import duckdb
 import pandas as pd
 
 from .archive_inputs import ALIAS_FILE, prepare_export
-from .inputs import BAR_FIELDS, BUNDLE_FILES, MEMBER_FIELDS, Inputs, read_files
+from .inputs import BAR_FIELDS, BUNDLE_FILES, MEMBER_FIELDS, STRESS_FIELDS, Inputs, read_files
+from .issuer_inputs import EARNINGS_FIELDS, FILING_FIELDS
 from .market_calendar import WINDOWS, capture_cutoff, exchange
 from .scope import NEW_YORK
 
 ARCHIVE_SCHEMA = 1
-TABLE_FIELDS = {"bars": BAR_FIELDS, "members": MEMBER_FIELDS}
+TABLE_FIELDS = {"bars": BAR_FIELDS, "members": MEMBER_FIELDS, "stress": STRESS_FIELDS,
+                "filings": FILING_FIELDS, "earnings": EARNINGS_FIELDS, "stock_sectors": MEMBER_FIELDS}
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY,
@@ -108,7 +110,8 @@ class Archive:
         if frame.empty:
             return []
         paths = []
-        for month, rows in frame.groupby(frame["session"].dt.strftime("%Y-%m")):
+        dates = frame["session"] if "session" in frame else frame["available_at"].dt.tz_convert(NEW_YORK)
+        for month, rows in frame.groupby(dates.dt.strftime("%Y-%m")):
             canonical = rows.to_csv(index=False, lineterminator="\n").encode()
             digest = sha256(canonical).hexdigest()
             path = Path("normalized") / f"v{ARCHIVE_SCHEMA}" / table / f"month={month}" / f"{digest}.parquet"
@@ -158,7 +161,9 @@ class Archive:
                 return self._record(run_id, "waiting", "Awaiting a permitted price export.")
             inputs, metadata = prepare_export(files, session, now)
             with duckdb.connect(config={"threads": 2}) as connection:
-                tables = {name: self._partitions(connection, name, getattr(inputs, name)) for name in TABLE_FIELDS}
+                tables = {name: self._partitions(connection, name, getattr(inputs, name))
+                          for name in TABLE_FIELDS
+                          if name in ("bars", "members") or not getattr(inputs, name).empty}
             manifest = {
                 "schema": ARCHIVE_SCHEMA,
                 "session": session.isoformat(),
@@ -167,8 +172,10 @@ class Archive:
                 "raw": {name: self._raw(name, payload) for name, payload in files.items()},
                 **metadata,
             }
-            for source in ("filings", "options", "estimates", "volatility"):
-                manifest["sources"][source] = {"status": "not configured"}
+            for source in ("filings", "earnings", "options", "estimates"):
+                manifest["sources"].setdefault(source, {"status": "not configured"})
+            if not inputs.stress_sources:
+                manifest["sources"]["volatility"] = {"status": "not configured"}
             return self._publish(run_id, session, manifest)
         except KeyboardInterrupt:
             self._record(run_id, "interrupted", "Capture stopped before publication.")
@@ -211,13 +218,17 @@ class Archive:
         tables = {}
         with duckdb.connect(config={"threads": 2}) as connection:
             for name, fields in TABLE_FIELDS.items():
-                paths = [str(self.root / path) for path in manifest["tables"][name]]
+                paths = [str(self.root / path) for path in manifest["tables"].get(name, [])]
                 if paths:
                     frame = connection.read_parquet(paths, hive_partitioning=False).df()
-                    frame["symbol"] = frame["security_id"].map(names)
-                    tables[name] = frame[fields]
+                    if "symbol" in fields:
+                        frame["symbol"] = frame["security_id"].map(names)
+                    tables[name] = frame.reindex(columns=fields)
                 else:
                     tables[name] = pd.DataFrame(columns=fields)
         return Inputs(**tables, source=manifest["sources"]["prices"]["label"],
                       membership_source=manifest["sources"]["membership"]["label"],
-                      demo=manifest["synthetic"]), manifest
+                      demo=manifest["synthetic"], stress_sources={
+                          name: source["label"] for name, source in manifest["sources"].get("stress", {}).items()
+                      }, issuer_sources={name: manifest["sources"][name] for name in ("filings", "earnings")
+                                         if name in manifest["sources"]}), manifest

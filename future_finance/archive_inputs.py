@@ -10,6 +10,7 @@ import pandas as pd
 from .inputs import BAR_FIELDS, Inputs, parse_bundle, source_metadata
 from .market_calendar import capture_cutoff, sessions_between
 from .scope import BENCHMARK, NEW_YORK, SYMBOL_PATTERN
+from .stress import observations_as_of
 
 ALIAS_FILE = "security_aliases.csv"
 ALIAS_FIELDS = ["symbol", "security_id", "start", "end"]
@@ -42,20 +43,25 @@ def _aliases(files: dict[str, bytes]) -> pd.DataFrame:
     return aliases
 
 
-def _identify(frame: pd.DataFrame, aliases: pd.DataFrame) -> pd.DataFrame:
+def _identify(frame: pd.DataFrame, aliases: pd.DataFrame, *, releases: bool = False) -> pd.DataFrame:
     frame = frame.copy()
     frame["security_id"] = "ticker:" + frame["symbol"]
     if frame.empty:
         return frame
+    effective = frame["available_at"].dt.tz_convert(NEW_YORK) if releases else frame["session"]
+    dates = effective.dt.strftime("%Y-%m-%d")
     by_symbol = frame.groupby("symbol").groups
     for symbol, spans in aliases.groupby("symbol"):
-        dates = frame.loc[by_symbol.get(symbol, []), "session"].dt.strftime("%Y-%m-%d")
+        symbol_dates = dates.loc[by_symbol.get(symbol, [])]
         for row in spans.itertuples(index=False):
-            mask = dates.ge(row.start)
+            mask = symbol_dates.ge(row.start)
             if row.end:
-                mask &= dates.lt(row.end)
-            frame.loc[dates[mask].index, "security_id"] = row.security_id
-    if frame.duplicated(["session", "security_id"]).any():
+                mask &= symbol_dates.lt(row.end)
+            frame.loc[symbol_dates[mask].index, "security_id"] = row.security_id
+    keys = ["available_at"] if releases else ["session"]
+    if releases and "period" in frame:
+        keys.append("period")
+    if frame.duplicated([*keys, "security_id"]).any():
         raise ValueError("More than one row resolves to the same security on a session.")
     return frame
 
@@ -63,8 +69,13 @@ def _identify(frame: pd.DataFrame, aliases: pd.DataFrame) -> pd.DataFrame:
 def _display_symbols(inputs: Inputs, aliases: pd.DataFrame, session: date) -> dict[str, str]:
     fields = ["session", "symbol", "security_id"]
     rows = inputs.bars[fields]
-    if not inputs.members.empty:
-        rows = pd.concat([rows, inputs.members[fields]], ignore_index=True)
+    for dated in (inputs.members, inputs.stock_sectors):
+        if not dated.empty:
+            rows = pd.concat([rows, dated[fields]], ignore_index=True)
+    for frame in (inputs.filings, inputs.earnings):
+        if not frame.empty:
+            local_days = frame["available_at"].dt.tz_convert(NEW_YORK).dt.tz_localize(None).dt.normalize()
+            rows = pd.concat([rows, frame.assign(session=local_days)[fields]], ignore_index=True)
     newest = rows.sort_values("session").drop_duplicates("security_id", keep="last")
     names = dict(zip(newest["security_id"], newest["symbol"]))
     day = session.isoformat()
@@ -101,26 +112,33 @@ def prepare_export(files: dict[str, bytes], session: date, now: datetime) -> tup
     day = pd.Timestamp(session)
     inputs.bars = inputs.bars.loc[inputs.bars["session"].le(day)].copy()
     inputs.members = inputs.members.loc[inputs.members["session"].le(day)].copy()
+    inputs.stock_sectors = inputs.stock_sectors.loc[inputs.stock_sectors["session"].le(day)].copy()
+    if not inputs.stress.empty:
+        inputs.stress = inputs.stress.loc[
+            inputs.stress["session"].le(day) & inputs.stress["available_at"].le(now)
+        ].copy()
     actual = inputs.bars.loc[inputs.bars["close"].notna()]
     if not (actual["session"].eq(day) & actual["symbol"].eq(BENCHMARK)).any():
         raise ValueError(f"Price export has no quoted {BENCHMARK} close for {session}.")
     first_price_day = inputs.bars["session"].min()
-    first_day = first_price_day
-    if not inputs.members.empty:
-        first_day = min(first_day, inputs.members["session"].min())
+    dated_inputs = {"bars": inputs.bars, "membership": inputs.members, "stock sectors": inputs.stock_sectors,
+                    "stress": inputs.stress}
+    first_day = min(frame["session"].min() for frame in dated_inputs.values() if not frame.empty)
     calendar = sessions_between(first_day.date(), session)
-    for name, dates in (("bars", inputs.bars["session"]), ("membership", inputs.members["session"])):
+    for name, frame in dated_inputs.items():
+        dates = frame["session"]
         invalid = dates.loc[~dates.isin(calendar)]
         if not invalid.empty:
             raise ValueError(f"{name} contains a non-session date, {invalid.iloc[0]:%Y-%m-%d}.")
     benchmark_dates = inputs.bars.loc[inputs.bars["symbol"].eq(BENCHMARK), "session"]
     gaps = calendar[calendar >= first_price_day].difference(benchmark_dates)
     if len(gaps):
-        rows = [[stamp, BENCHMARK, float("nan"), float("nan"), float("nan"), float("nan")] for stamp in gaps]
-        inputs.bars = pd.concat([inputs.bars, pd.DataFrame(rows, columns=BAR_FIELDS)], ignore_index=True)
+        missing = pd.DataFrame({"session": gaps, "symbol": BENCHMARK}).reindex(columns=BAR_FIELDS)
+        inputs.bars = pd.concat([inputs.bars, missing], ignore_index=True)
     aliases = _aliases(files)
     inputs.bars = _identify(inputs.bars, aliases).sort_values(["session", "symbol"])
     inputs.members = _identify(inputs.members, aliases).sort_values(["session", "symbol"])
+    inputs.stock_sectors = _identify(inputs.stock_sectors, aliases).sort_values(["session", "symbol"])
     present = inputs.members["session"].eq(day)
     first_bar = actual.loc[actual["symbol"].eq(BENCHMARK), "session"].min()
     sources = {
@@ -138,6 +156,29 @@ def prepare_export(files: dict[str, bytes], session: date, now: datetime) -> tup
             "first_session": inputs.members["session"].min().date().isoformat() if len(inputs.members) else None,
         },
     }
+    if inputs.stress_sources:
+        known = observations_as_of(inputs.stress, day, capture_cutoff(session))
+        stress_sources = {}
+        for series, label in inputs.stress_sources.items():
+            history = known.loc[known["series"].eq(series)]
+            details = {"status": "missing at cutoff", "label": label}
+            if not history.empty:
+                latest = history.iloc[-1]
+                details.update(status="available", observed_session=latest.session.date().isoformat(),
+                               published_at=latest.available_at.tz_convert(NEW_YORK).isoformat(),
+                               first_session=history["session"].min().date().isoformat())
+            stress_sources[series] = details
+        sources["stress"] = stress_sources
+    for name, source in inputs.issuer_sources.items():
+        history = getattr(inputs, name)
+        if source["status"] == "loaded":
+            history = _identify(history.loc[history["available_at"].le(capture_cutoff(session))],
+                                aliases, releases=True)
+            setattr(inputs, name, history)
+            source["status"] = "missing at cutoff" if history.empty else "available"
+            if not history.empty:
+                source["published_at"] = history["available_at"].max().tz_convert(NEW_YORK).isoformat()
+        sources[name] = source
     return inputs, {
         "synthetic": synthetic,
         "vintage": "synthetic" if synthetic else "reconstructed export",

@@ -7,9 +7,9 @@ import streamlit as st
 
 from future_finance.archive import Archive
 from future_finance.demo import make_demo
-from future_finance.inputs import import_bundle
+from future_finance.inputs import BUNDLE_FILES, import_bundle
 from future_finance.scope import SECTORS, read_watchlist
-from future_finance import views
+from future_finance import market_views, views
 
 ROOT = Path(__file__).resolve().parent
 LOCAL_DATA = ROOT / "data"
@@ -33,6 +33,11 @@ def archived_data(folder: Path, version: int):
 def open_stock(ticker: str) -> None:
     st.session_state["stock_choice"] = ticker
     st.session_state["view"] = "Stock"
+
+
+def open_sector(ticker: str) -> None:
+    st.session_state["sector_choice"] = ticker
+    st.session_state["view"] = "Sector"
 
 
 def remember(widget_key: str, state_key: str) -> None:
@@ -60,6 +65,10 @@ h1, h2, h3 { letter-spacing: -.035em; }
 [data-testid="stMetric"] { padding: .4rem 0; }
 [data-testid="stCaptionContainer"] { color: #455771; }
 .masthead { font-size: 1.12rem; font-weight: 750; letter-spacing: -.025em; color: #142746; }
+@media (max-width: 650px) {
+    [data-testid="stHorizontalBlock"] { flex-wrap: wrap; }
+    [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] { min-width: 100%; }
+}
 </style>
 <div class="masthead">FutureFinance</div>
 """, unsafe_allow_html=True)
@@ -72,7 +81,7 @@ try:
         st.session_state["archive_versions"] = publications
         published = [pd.Timestamp(day) for day in publications]
     else:
-        files = [LOCAL_DATA / name for name in ("source.json", "bars.csv", "membership.csv")]
+        files = [LOCAL_DATA / name for name in BUNDLE_FILES]
         if any(path.is_file() for path in files):
             updated = tuple(path.stat().st_mtime_ns if path.is_file() else 0 for path in files)
             inputs = local_data(LOCAL_DATA, updated)
@@ -93,6 +102,7 @@ with window_control:
     window = st.selectbox("Chart window", [20, 60, 120, 252], index=1,
                           format_func=lambda value: f"{value} sessions")
 
+manifest = None
 if publications:
     try:
         inputs, manifest = archived_data(archive.root, publications[day.date()])
@@ -101,7 +111,7 @@ if publications:
         st.stop()
     st.info(f"Archived session from {inputs.source}. Version {manifest['version']} · {manifest['vintage'].capitalize()}.")
 elif inputs.demo:
-    st.info("Phase 1 preview with synthetic prices, constituents and financial statements.")
+    st.info("Synthetic preview with sample prices, membership, volatility, credit and financial statements.")
 else:
     st.info(f"Local price import from {inputs.source}.")
 universe = inputs.membership_source or "Membership unavailable"
@@ -110,14 +120,14 @@ st.caption(f"SPY benchmark and QQQ comparison · {universe}")
 split = inputs.prices("split_close").loc[:day]
 total = inputs.prices("total_return_close").loc[:day]
 session = views.Session(inputs, split, total, inputs.prices("close").loc[:day],
-                        pd.DatetimeIndex(split.index[-window:]))
+                        pd.DatetimeIndex(split.index[-window:]), manifest)
 
 if view == "Market":
-    views.market(session)
+    market_views.market(session, open_sector)
 elif view == "Sector":
     sector = choose("Sector", list(SECTORS), "sector_choice", "XLK",
                     lambda ticker: f"{SECTORS[ticker]} ({ticker})")
-    views.sector(session, sector, open_stock)
+    market_views.sector(session, sector, open_stock)
 else:
     stock_choice = st.session_state.get("stock_choice")
     options = list(dict.fromkeys(watchlist + ([stock_choice] if stock_choice else [])))

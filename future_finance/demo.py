@@ -3,7 +3,9 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
-from .inputs import BAR_FIELDS, Inputs
+from .inputs import BAR_FIELDS, MEMBER_FIELDS, Inputs
+from .issuer_inputs import EARNINGS_FIELDS, FILING_FIELDS
+from .market_calendar import sessions_between
 from .scope import NEW_YORK, SECTORS
 
 DEMO_SECTOR = {
@@ -14,15 +16,11 @@ DEMO_SECTOR = {
     "UNH": "XLV", "LLY": "XLV", "COST": "XLP", "WMT": "XLP",
     "CAT": "XLI", "LIN": "XLB", "NEE": "XLU",
 }
+DEMO_SHARES = {"AAPL": 14.8e9, "MSFT": 7.4e9, "NVDA": 24.4e9}
 
 
 def _sessions() -> pd.DatetimeIndex:
-    closed = pd.to_datetime([
-        "2024-11-28", "2024-12-25", "2025-01-01", "2025-01-09", "2025-01-20",
-        "2025-02-17", "2025-04-18", "2025-05-26", "2025-06-19", "2025-07-04",
-    ])
-    sessions = pd.bdate_range("2024-09-03", "2025-08-08")
-    return sessions.difference(closed)
+    return sessions_between(pd.Timestamp("2024-09-03").date(), pd.Timestamp("2025-08-08").date())
 
 
 def make_demo() -> Inputs:
@@ -35,7 +33,10 @@ def make_demo() -> Inputs:
         for date, value in zip(dates, close, strict=True):
             if date >= pd.Timestamp(start):
                 price = round(float(value), 2)
-                bars.append((date, symbol, price, price, price, int(rng.integers(500_000, 6_000_000))))
+                volume = int(rng.integers(500_000, 6_000_000))
+                market_cap = price * DEMO_SHARES.get(symbol, np.nan)
+                bars.append((date, symbol, price, price, price, volume, price * 1.012, price * 0.989,
+                             market_cap, volume))
 
     market = 515 + x * 0.4 + 6 * np.sin(x / 10) + 3 * np.cos(x / 3.1)
     market[-1] = market[-2] * 1.0084
@@ -68,23 +69,34 @@ def make_demo() -> Inputs:
 
     membership = pd.DataFrame(
         [(date, ticker, sector) for date in dates for ticker, sector in members.items()],
-        columns=["session", "symbol", "sector_etf"],
+        columns=MEMBER_FIELDS,
     )
+    stock_sectors = pd.DataFrame({"session": dates, "symbol": "RIVN", "sector_etf": "XLY"})
     filings = pd.DataFrame([
-        ("AAPL", "2025-06-28", datetime(2025, 7, 31, 16, 10, tzinfo=NEW_YORK),
-         94000, 86000, 26320, 25800, 105_000, 12_000, 6.5),
-        ("RIVN", "2025-06-30", datetime(2025, 8, 5, 17, tzinfo=NEW_YORK),
-         1300, 1160, -1105, -1369, -2600, 1700, -4.5),
-    ], columns=[
-        "symbol", "period", "available_at", "revenue", "prior_revenue",
-        "operating_income", "prior_operating_income", "ttm_cfo", "ttm_capex", "ttm_eps",
-    ])
+        ("AAPL", "320193", None, "10-Q", "2025-06-28", datetime(2025, 7, 31, 16, 10, tzinfo=NEW_YORK),
+         "operating", 94e9, 86e9, 26.32e9, 25.8e9, 105e9, 12e9, 6.5, 99e9, 137e9, 115e9, 3e9, "2025-07-31"),
+        ("MSFT", "789019", None, "10-K", "2025-06-30", datetime(2025, 7, 30, 16, 10, tzinfo=NEW_YORK),
+         "operating", 76e9, 66e9, 34e9, 29e9, 130e9, 66e9, 12, 48e9, 145e9, 128e9, 2e9, "2025-07-30"),
+        ("NVDA", "1045810", None, "10-Q", "2025-04-27", datetime(2025, 5, 28, 16, 10, tzinfo=NEW_YORK),
+         "operating", 44e9, 26e9, 22e9, 17e9, 72e9, 4e9, 3.2, 9e9, 81e9, 77e9, 0.25e9, "2025-05-28"),
+        ("RIVN", "1874178", None, "10-Q", "2025-06-30", datetime(2025, 8, 5, 17, tzinfo=NEW_YORK),
+         "operating", 1.3e9, 1.16e9, -1.105e9, -1.369e9, -2.6e9, 1.7e9, -4.5, 4.4e9, -3e9,
+         -3.6e9, 0.24e9, "2025-08-05"),
+    ], columns=FILING_FIELDS)
+    filings["period"] = pd.to_datetime(filings["period"])
+    filings["eps_basis_session"] = pd.to_datetime(filings["eps_basis_session"])
+    earnings = pd.DataFrame([
+        ("AAPL", pd.Timestamp("2025-10-30"), "estimated", datetime(2025, 7, 31, 16, 15, tzinfo=NEW_YORK), None),
+    ], columns=EARNINGS_FIELDS)
     stress = pd.DataFrame({
         "session": dates[:-1],
-        "available_on": dates[1:],
+        "available_at": (dates[1:] + pd.Timedelta(hours=10)).tz_localize(NEW_YORK).tz_convert("UTC"),
         "VIX": 20 + 3 * np.sin(x[:-1] / 16),
         "VIX3M": 22 + 2 * np.sin(x[:-1] / 19),
         "OAS": 3.4 + 0.26 * np.cos(x[:-1] / 11),
-    }).set_index("session")
+    }).melt(id_vars=["session", "available_at"], var_name="series", value_name="value")
     return Inputs(pd.DataFrame(bars, columns=BAR_FIELDS), membership,
-                  "Synthetic daily bars", "Synthetic 100-stock universe", True, filings, stress)
+                  "Synthetic daily bars", "Synthetic 100-stock universe", demo=True, filings=filings,
+                  stress=stress, stress_sources={"VIX": "Synthetic volatility", "VIX3M": "Synthetic volatility",
+                                                 "OAS": "Synthetic credit spread"}, earnings=earnings,
+                  stock_sectors=stock_sectors)
