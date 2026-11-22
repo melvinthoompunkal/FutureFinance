@@ -9,7 +9,7 @@ from future_finance.archive import Archive
 from future_finance.demo import make_demo
 from future_finance.inputs import BUNDLE_FILES, import_bundle
 from future_finance.scope import SECTORS, read_watchlist
-from future_finance import market_views, views
+from future_finance import market_views, views, workspace
 
 ROOT = Path(__file__).resolve().parent
 LOCAL_DATA = ROOT / "data"
@@ -35,6 +35,12 @@ def open_stock(ticker: str) -> None:
     st.session_state["view"] = "Stock"
 
 
+def open_watchlist_stock() -> None:
+    ticker = st.session_state["watchlist_lookup"]
+    if ticker is not None:
+        open_stock(ticker)
+
+
 def open_sector(ticker: str) -> None:
     st.session_state["sector_choice"] = ticker
     st.session_state["view"] = "Sector"
@@ -53,25 +59,8 @@ def choose(label: str, options, key: str, default: str, format_func=str) -> str:
     )
 
 
-st.set_page_config(page_title="FutureFinance", page_icon="📈", layout="wide")
-st.markdown("""
-<style>
-[data-testid="stMainBlockContainer"] { max-width: 1260px; padding-top: 2rem; }
-[data-testid="stHeader"] { background: transparent; }
-h1, h2, h3 { letter-spacing: -.035em; }
-[data-testid="stMetricValue"], [data-testid="stMetricDelta"] { font-variant-numeric: tabular-nums; }
-[data-testid="stMetricValue"] { font-size: clamp(1.2rem, 2.3vw, 1.85rem); white-space: normal; }
-[data-testid="stMetricLabel"] { min-height: auto; margin-bottom: .15rem; }
-[data-testid="stMetric"] { padding: .4rem 0; }
-[data-testid="stCaptionContainer"] { color: #455771; }
-.masthead { font-size: 1.12rem; font-weight: 750; letter-spacing: -.025em; color: #142746; }
-@media (max-width: 650px) {
-    [data-testid="stHorizontalBlock"] { flex-wrap: wrap; }
-    [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] { min-width: 100%; }
-}
-</style>
-<div class="masthead">FutureFinance</div>
-""", unsafe_allow_html=True)
+st.set_page_config(page_title="FutureFinance", layout="wide")
+st.html(workspace.STYLE)
 
 try:
     watchlist = read_watchlist(ROOT / "watchlist.txt")
@@ -93,14 +82,17 @@ except (OSError, ValueError, sqlite3.Error) as error:
     st.error(f"Could not load dashboard inputs. {error}")
     st.stop()
 
-nav, day_control, window_control = st.columns([2.2, 1.45, 1])
-with nav:
-    view = st.radio("View", ["Market", "Sector", "Stock"], horizontal=True, key="view")
-with day_control:
-    day = st.selectbox("Session (New York)", published, format_func=lambda value: value.strftime("%b %d, %Y"))
-with window_control:
-    window = st.selectbox("Chart window", [20, 60, 120, 252], index=1,
-                          format_func=lambda value: f"{value} sessions")
+with st.container(key="toolbar"):
+    brand, nav, day_control, window_control = st.columns([1.1, 2, 1, .9], vertical_alignment="center")
+    brand.html('<div class="ff-brand"><span aria-hidden="true" class="ff-mark"></span>FutureFinance</div>')
+    with nav:
+        view = st.radio("View", ["Market", "Sector", "Stock"], horizontal=True, key="view",
+                        label_visibility="collapsed")
+    with day_control:
+        day = st.selectbox("Session (New York)", published, format_func=lambda value: value.strftime("%b %d, %Y"))
+    with window_control:
+        window = st.selectbox("Chart window", [20, 60, 120, 252], index=1,
+                              format_func=lambda value: f"{value} sessions")
 
 manifest = None
 if publications:
@@ -109,29 +101,53 @@ if publications:
     except (OSError, ValueError, duckdb.Error, sqlite3.Error) as error:
         st.error(f"Could not read the published session. {error}")
         st.stop()
-    st.info(f"Archived session from {inputs.source}. Version {manifest['version']} · {manifest['vintage'].capitalize()}.")
+    source = f"Archived session from {inputs.source}. Version {manifest['version']} · {manifest['vintage'].capitalize()}."
 elif inputs.demo:
-    st.info("Synthetic preview. Market, company and research data are illustrative.")
+    source = "Synthetic preview"
 else:
-    st.info(f"Local price import from {inputs.source}.")
+    source = f"Local price import from {inputs.source}."
 universe = inputs.membership_source or "Membership unavailable"
-st.caption(f"SPY benchmark and QQQ comparison · {universe}")
+with st.container(key="sourcebar"):
+    source_col, coverage_col = st.columns([1, 1])
+    source_col.info(source)
+    coverage_col.caption(f"SPY benchmark · QQQ comparison · {universe}")
 
 split = inputs.prices("split_close").loc[:day]
 total = inputs.prices("total_return_close").loc[:day]
 session = views.Session(inputs, split, total, inputs.prices("close").loc[:day],
                         pd.DatetimeIndex(split.index[-window:]), manifest)
 
-if view == "Market":
-    market_views.market(session, open_sector)
-elif view == "Sector":
-    sector = choose("Sector", list(SECTORS), "sector_choice", "XLK",
-                    lambda ticker: f"{SECTORS[ticker]} ({ticker})")
-    market_views.sector(session, sector, open_stock)
-else:
-    stock_choice = st.session_state.get("stock_choice")
-    options = list(dict.fromkeys(watchlist + ([stock_choice] if stock_choice else [])))
-    if options:
-        views.stock(session, choose("Watchlist symbol", options, "stock_choice", options[0]))
-    else:
-        st.info("Add a symbol to watchlist.txt or open a stock from a sector.")
+with st.container(key="workspace"):
+    rail = st.container(key="watchlist-panel")
+    main = st.container(key="chart-panel")
+    details = st.container(key="evidence-panel")
+    with rail:
+        st.subheader("Watchlist")
+        ticker = None
+        if view == "Stock":
+            stock_choice = st.session_state.get("stock_choice")
+            options = list(dict.fromkeys(watchlist + ([stock_choice] if stock_choice else [])))
+            if options:
+                ticker = choose("Watchlist symbol", options, "stock_choice", options[0])
+        elif watchlist:
+            st.selectbox("Watchlist symbol", watchlist, index=None, placeholder="Find a symbol",
+                         key="watchlist_lookup", on_change=open_watchlist_stock)
+        if watchlist:
+            workspace.watchlist_quotes(session, watchlist, ticker)
+        else:
+            st.caption("Add symbols to watchlist.txt.")
+
+    with main:
+        if view == "Market":
+            market_views.market(session, open_sector, details)
+        elif view == "Sector":
+            with details:
+                st.subheader("Sector detail")
+                sector = choose("Sector", list(SECTORS), "sector_choice", "XLK",
+                                lambda ticker: f"{SECTORS[ticker]} ({ticker})")
+            market_views.sector(session, sector, open_stock, details)
+        elif ticker:
+            views.stock(session, ticker, details)
+        else:
+            st.title("Stock detail")
+            st.info("Add a symbol to watchlist.txt or open a stock from a sector.")

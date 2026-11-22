@@ -14,7 +14,7 @@ def _breadth_chart(history: dict, dates: pd.DatetimeIndex) -> None:
         for window, series in history.items()
     }).reindex(dates)
     if values.notna().any().any():
-        charts.lines(values, "Members above average (%)", height=155, domain=[0, 100])
+        charts.lines(values, "Members above average (%)", height=265, domain=[0, 100])
 
 
 def _breadth_evidence(history: dict, day: pd.Timestamp, earlier: pd.Timestamp | None) -> None:
@@ -83,22 +83,29 @@ def _concentration_proxy(session: Session) -> None:
 
 
 def _market_leadership(session: Session, open_sector) -> None:
-    st.subheader("Sector leaders and laggards")
+    st.subheader("Sector drilldown")
     ranking = calc.sector_ranking(session.total)
     moves = ranking["20 sessions"]
-    selected = pd.concat([ranking.loc[moves.gt(0)].head(3), ranking.loc[moves.lt(0)].tail(3)])
-    if selected.empty:
-        st.caption("No sectors have a positive or negative 20-session relative return for this date.")
-    else:
-        _ranking_table(selected[["Rank", "Sector", "20 sessions", "Absolute, 20 sessions"]])
+    leaders = ranking.loc[moves.gt(0)].head(3)
+    laggards = ranking.loc[moves.lt(0)].tail(3)
+    selected = pd.concat([leaders, laggards])
+    if not selected.empty:
+        extremes = pd.concat([leaders.head(1), laggards.tail(1)])
+        snapshot = " / ".join(f"{ticker} {signed(value)}" for ticker, value in extremes["20 sessions"].items())
+        st.caption(f"{snapshot} vs. SPY over 20 sessions.")
     options = list(ranking.index)
     prior = st.session_state.get("sector_choice", options[0])
     ticker = st.selectbox("Sector to inspect", options, index=options.index(prior),
                           format_func=lambda value: f"{SECTORS[value]} ({value})", key="market_sector")
     st.button("Open sector detail", on_click=open_sector, args=(ticker,))
+    if selected.empty:
+        st.caption("No sectors have a positive or negative 20-session relative return for this date.")
+    else:
+        with st.expander("Sector leaders and laggards"):
+            _ranking_table(selected[["Rank", "Sector", "20 sessions", "Absolute, 20 sessions"]])
 
 
-def market(session: Session, open_sector) -> None:
+def market(session: Session, open_sector, details) -> None:
     st.title("U.S. market")
     dates = session.split.index[-max(6, len(session.dates)):]
     earlier = dates[-6] if len(dates) >= 6 else None
@@ -113,11 +120,26 @@ def market(session: Session, open_sector) -> None:
         lead += f" {qualifier}{reading.percent:.0f}% of eligible members are above their 50-session average."
     st.write(lead)
 
-    main, evidence = st.columns([3, 1.45], gap="large")
-    with main:
-        st.subheader("Benchmark performance")
+    performance, participation, stress, internals = st.tabs(
+        ["Performance", "Participation", "Volatility & credit", "Internals"]
+    )
+    with performance:
         return_chart(session, [BENCHMARK, COMPARISON])
-    with evidence:
+    with participation:
+        if session.inputs.membership_source:
+            st.caption(session.inputs.membership_source)
+        _breadth_chart(history, session.dates)
+        if not reading.expected:
+            _concentration_proxy(session)
+        else:
+            with st.expander("Member closes and moving averages"):
+                st.dataframe(_breadth_data(members.loc[members["session"].eq(session.day)]), width="stretch")
+    with stress:
+        market_stress(session)
+    with internals:
+        research_views.market(session)
+
+    with details:
         st.subheader("Trend at the close")
         spy_trend = calc.trend(gaps)
         st.metric("SPY trend", spy_trend)
@@ -133,24 +155,10 @@ def market(session: Session, open_sector) -> None:
             if spy_trend != qqq_trend and "Incomplete history" not in (spy_trend, qqq_trend):
                 st.caption("QQQ and SPY have different trend readings.")
 
-    main, evidence = st.columns([3, 1.45], gap="large")
-    with main:
-        st.subheader("Market participation")
-        if session.inputs.membership_source:
-            st.caption(session.inputs.membership_source)
-        _breadth_chart(history, session.dates)
-        if not reading.expected:
-            _concentration_proxy(session)
-    with evidence:
-        st.subheader("Breadth at the close")
+        st.subheader("Market breadth")
         _breadth_evidence(history, session.day, earlier)
-        if reading.expected:
-            with st.expander("Member closes and moving averages"):
-                st.dataframe(_breadth_data(members.loc[members["session"].eq(session.day)]), width="stretch")
-    market_stress(session)
-    _market_leadership(session, open_sector)
-    _sources(session)
-    research_views.market(session)
+        _market_leadership(session, open_sector)
+        _sources(session)
 
 
 def _ranking_table(ranking: pd.DataFrame) -> None:
@@ -173,7 +181,7 @@ def _sector_summary(chosen: str, relative: float, absolute: float) -> None:
         st.write(f"{chosen} needs dividend-adjusted closes 20 sessions apart.")
 
 
-def sector(session: Session, chosen: str, open_stock) -> None:
+def sector(session: Session, chosen: str, open_stock, details) -> None:
     st.title("Sector leadership")
     dates = session.split.index[-max(6, len(session.dates)):]
     earlier = dates[-6] if len(dates) >= 6 else None
@@ -184,52 +192,59 @@ def sector(session: Session, chosen: str, open_stock) -> None:
     ranking["Breadth (50)"] = {ticker: count.percent for ticker, count in by_sector.items()}
     ranking["Eligible members"] = {ticker: f"{count.eligible} / {count.expected}"
                                    for ticker, count in by_sector.items()}
-    left, right = st.columns([1, 1.5], gap="large")
-    with left:
-        st.subheader("20 sessions vs. SPY")
-        charts.sector_bars(ranking)
-    with right:
-        st.subheader("Relative and absolute returns")
-        _ranking_table(ranking)
-        st.caption(f"{ranking['Rank'].count()} of {len(SECTORS)} sectors ranked. Relative returns measure "
-                   "changes in the dividend-adjusted ETF / SPY ratio. Breadth uses dated members.")
-    st.subheader(f"{SECTORS[chosen]} ({chosen})")
     _sector_summary(chosen, ranking.at[chosen, "20 sessions"], ranking.at[chosen, "Absolute, 20 sessions"])
     historic = calc.breadth_readings(members, dates, chosen)
-    main, evidence = st.columns([3, 1.45], gap="large")
-    with main:
+    ranks, performance, participation, research = st.tabs(
+        ["Rankings", "Performance", "Participation", "Rotation & news"]
+    )
+    with ranks:
+        st.caption(f"{ranking['Rank'].count()} of {len(SECTORS)} sectors ranked by 20-session return vs. SPY.")
+        charts.sector_bars(ranking)
+        with st.expander("Relative and absolute returns"):
+            _ranking_table(ranking)
+            st.caption("Relative returns measure changes in the dividend-adjusted ETF / SPY ratio. "
+                       "Breadth uses dated members.")
+    with performance:
         ratio = calc.relative(session.total, chosen).loc[session.dates]
         valid = ratio.dropna()
         if not valid.empty:
             charts.lines(ratio.div(valid.iloc[0]).mul(100).to_frame(f"{chosen} / SPY"),
-                         "Relative performance index", index_baseline=True)
+                         "Relative performance index", height=325, index_baseline=True)
         else:
             st.caption(f"No common dividend-adjusted closes for {chosen} and SPY in this window.")
-        _breadth_chart(historic, session.dates)
-    with evidence:
-        st.subheader("Sector participation")
+    with participation:
         if session.inputs.membership_source:
             st.caption(session.inputs.membership_source)
-        _breadth_evidence(historic, session.day, earlier)
+        _breadth_chart(historic, session.dates)
+        if not historic[50][session.day].expected:
+            st.caption(f"No dated members are mapped to {chosen} on the selected session.")
+    with research:
+        research_views.sector(session, chosen)
 
+    with details:
+        _sector_members(session, today, chosen, open_stock)
+        st.subheader("Sector breadth")
+        _breadth_evidence(historic, session.day, earlier)
+        _sources(session)
+
+
+def _sector_members(session: Session, today: pd.DataFrame, chosen: str, open_stock) -> None:
     selected = today.loc[today["sector_etf"].eq(chosen)]
     if selected.empty:
         st.caption(f"No members are mapped to {chosen} on the selected session.")
+        return
+    moves = calc.member_returns(session.total, selected["symbol"])
+    count = int(moves.count())
+    st.subheader("Sector members")
+    member = st.selectbox("Sector member", moves.index, key=f"member_{chosen}")
+    st.button(f"Open {member} stock detail", on_click=open_stock, args=(member,))
+    if count:
+        leaders = int(moves.gt(0).sum())
+        st.caption(f"{leaders} of {count} eligible members ({leaders / count:.0%}) outperformed SPY over "
+                   f"20 sessions. Comparable prices were available for {count} of {len(selected)} members.")
     else:
-        moves = calc.member_returns(session.total, selected["symbol"])
-        count = int(moves.count())
-        st.subheader("Sector members")
-        if count:
-            leaders = int(moves.gt(0).sum())
-            st.caption(f"{leaders} of {count} eligible members ({leaders / count:.0%}) outperformed SPY over "
-                       f"20 sessions. Comparable prices were available for {count} of {len(selected)} members.")
-        else:
-            st.caption(f"0 of {len(selected)} members have comparable closes 20 sessions apart.")
-        with st.expander("Member returns and moving averages"):
-            data = _breadth_data(selected).reindex(moves.index).drop(columns="Sector ETF")
-            data.insert(0, "20-session return vs. SPY (%)", moves)
-            st.dataframe(data, width="stretch")
-        member = st.selectbox("Sector member", moves.index, key=f"member_{chosen}")
-        st.button(f"Open {member} stock detail", on_click=open_stock, args=(member,))
-    _sources(session)
-    research_views.sector(session, chosen)
+        st.caption(f"0 of {len(selected)} members have comparable closes 20 sessions apart.")
+    with st.expander("Member returns and moving averages"):
+        data = _breadth_data(selected).reindex(moves.index).drop(columns="Sector ETF")
+        data.insert(0, "20-session return vs. SPY (%)", moves)
+        st.dataframe(data, width="stretch")

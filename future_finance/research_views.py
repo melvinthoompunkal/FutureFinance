@@ -76,16 +76,17 @@ def sector(session: "Session", selected: str) -> None:
                 "x": alt.X("Relative strength:Q", scale=alt.Scale(zero=False)),
                 "y": alt.Y("Relative momentum:Q", scale=alt.Scale(zero=False)),
             }
-            baseline = alt.Chart(pd.DataFrame({"Center": [100]})).mark_rule(color="#8797AE")
-            track = alt.Chart(trail).mark_line(color="#155CBE", opacity=.65).encode(**xy, order="Session:T")
+            baseline = alt.Chart(pd.DataFrame({"Center": [100]})).mark_rule(color=charts.REFERENCE)
+            track = alt.Chart(trail).mark_line(color=charts.COLORS[0], opacity=.65).encode(**xy, order="Session:T")
             dots = points.mark_circle(size=90, opacity=.9).encode(
-                **xy, color=alt.condition(alt.datum.ETF == selected, alt.value("#155CBE"), alt.value("#626991")),
+                **xy, color=alt.condition(alt.datum.ETF == selected,
+                                          alt.value(charts.COLORS[0]), alt.value(charts.COLORS[1])),
                 tooltip=["ETF:N", alt.Tooltip("Session:T", format="%b %d, %Y"), "Quadrant:N",
                          alt.Tooltip("Relative strength:Q", format=".2f"),
                          alt.Tooltip("Relative momentum:Q", format=".2f")],
             )
-            st.altair_chart(alt.layer(baseline.encode(x="Center:Q"), baseline.encode(y="Center:Q"), track, dots)
-                            .properties(height=235).configure_view(stroke=None), width="stretch", theme=None)
+            charts.render(alt.layer(baseline.encode(x="Center:Q"), baseline.encode(y="Center:Q"), track, dots)
+                          .properties(height=235))
             st.dataframe(current[["ETF", "Sector", "Relative strength", "Relative momentum", "Quadrant"]].round(2),
                          width="stretch", hide_index=True)
             st.caption(f"{selected} trail uses the last available session of each week, through the selected date. "
@@ -144,14 +145,16 @@ def _gamma(checked, oi, day, session):
     else:
         st.caption("No crossing in range.")
     curve = profile.curve
-    chart = alt.Chart(curve).mark_line(color="#155CBE").encode(
+    chart = alt.Chart(curve).mark_line(color=charts.COLORS[0]).encode(
         x=alt.X("Spot ($):Q", scale=alt.Scale(zero=False)),
         y=alt.Y("Net gamma:Q", title="Modeled dollars per 1% move"),
         tooltip=[alt.Tooltip("Spot ($):Q", format=".2f"), alt.Tooltip("Net gamma:Q", format=",.0f")])
-    zero = alt.Chart(pd.DataFrame({"zero": [0]})).mark_rule(color="#8797AE").encode(y="zero:Q")
-    markers = alt.Chart(pd.DataFrame({"Spot ($)": crossings})).mark_rule(color="#A25316", strokeDash=[4, 4]).encode(
+    zero = alt.Chart(pd.DataFrame({"zero": [0]})).mark_rule(color=charts.REFERENCE).encode(y="zero:Q")
+    markers = alt.Chart(pd.DataFrame({"Spot ($)": crossings})).mark_rule(
+        color=charts.COLORS[1], strokeDash=[4, 4]
+    ).encode(
         x="Spot ($):Q", tooltip=[alt.Tooltip("Spot ($):Q", format=".2f")])
-    st.altair_chart(alt.layer(chart, zero, markers).properties(height=175), width="stretch", theme=None)
+    charts.render(alt.layer(chart, zero, markers).properties(height=175))
     st.caption("The model reprices gamma at fixed IV by contract across ±20% of spot. "
                "It uses time to settlement, rate, dividend yield, prior-session OI and verified multipliers.")
     with st.expander("Gamma profile chart data"):
@@ -181,103 +184,103 @@ def _walls(frame: pd.DataFrame, spot: float, field: str, label: str) -> None:
             st.caption(f"{side.capitalize()} wall by {label} ${candidates.idxmax():,.2f}.")
 
 
-def _chain(session: "Session", ticker: str, split: pd.Series, cutoff) -> None:
-    with st.expander("Options, implied moves and positioning"):
-        _source(session, "options")
-        history = options.visible_history(session.inputs.research, ticker, session.day)
-        if history.empty:
-            st.caption("No permitted chain snapshots for this symbol at the selected cutoff.")
-            return
-        day = session.day
-        current = options.latest_chain(history, day)
-        checked = options.assess_quotes(current, day)
-        sample = options.iv_history(history, split.index)
-        count, rank, percentile = options.iv_reading(sample)
-        latest = sample.iloc[-1]
-        left, middle, right = st.columns(3)
-        left.metric("30-day ATM IV", _value(latest, "%"))
-        middle.metric("IV rank", _value(rank, "%"))
-        right.metric("IV percentile", _value(percentile, "%"))
-        status = "Collecting history" if count < 60 else "Provisional window" if count < 252 else "Full 252 sessions"
-        st.caption(f"{status}. {count} valid observations in the latest 252 sessions. "
-                   "Rank measures position in the observed range. Percentile counts readings strictly below today's.")
-        if count:
-            charts.lines(sample.loc[session.dates].to_frame(), "Annualized implied volatility (%)", height=160)
-        risk = price_risk(session.inputs, ticker, split, session.dates)
-        rv = risk["Realized volatility (20)"]
-        st.caption(f"20-session realized volatility {_value(rv, '%')}. 60-session realized volatility "
-                   f"{_value(risk['Realized volatility (60)'], '%')}. IV minus 20-session realized "
-                   f"{_value(latest - rv, ' pp')}.")
-        if current.empty:
-            st.caption("No chain on the selected session.")
+def stock_options(session: "Session", ticker: str, split: pd.Series) -> None:
+    cutoff = capture_cutoff(session.day.date())
+    _source(session, "options")
+    history = options.visible_history(session.inputs.research, ticker, session.day)
+    if history.empty:
+        st.caption("No permitted chain snapshots for this symbol at the selected cutoff.")
+        return
+    day = session.day
+    current = options.latest_chain(history, day)
+    checked = options.assess_quotes(current, day)
+    sample = options.iv_history(history, split.index)
+    count, rank, percentile = options.iv_reading(sample)
+    latest = sample.iloc[-1]
+    left, middle, right = st.columns(3)
+    left.metric("30-day ATM IV", _value(latest, "%"))
+    middle.metric("IV rank", _value(rank, "%"))
+    right.metric("IV percentile", _value(percentile, "%"))
+    status = "Collecting history" if count < 60 else "Provisional window" if count < 252 else "Full 252 sessions"
+    st.caption(f"{status}. {count} valid observations in the latest 252 sessions. "
+               "Rank measures position in the observed range. Percentile counts readings strictly below today's.")
+    if count:
+        charts.lines(sample.loc[session.dates].to_frame(), "Annualized implied volatility (%)", height=160)
+    risk = price_risk(session.inputs, ticker, split, session.dates)
+    rv = risk["Realized volatility (20)"]
+    st.caption(f"20-session realized volatility {_value(rv, '%')}. 60-session realized volatility "
+               f"{_value(risk['Realized volatility (60)'], '%')}. IV minus 20-session realized "
+               f"{_value(latest - rv, ' pp')}.")
+    if current.empty:
+        st.caption("No chain on the selected session.")
+    else:
+        observed = current["observed_at"].iloc[0].tz_convert(NEW_YORK)
+        st.caption(f"Chain captured {observed:%b %d, %Y at %I:%M %p %Z}. Spot ${current['spot'].iloc[0]:,.2f}.")
+        with st.expander("Quote quality and contract timestamps"):
+            st.dataframe(checked["quality"].value_counts().rename("Contracts"), width="stretch")
+            st.dataframe(checked[["contract", "expiry", "quote_at", "spot_at", "bid", "ask", "quality"]],
+                         width="stretch", hide_index=True)
+            st.caption("Quotes need standard verified terms, a positive bid, a spread no wider than 35% of mid, "
+                       "and spot within 20 minutes of the quote. Both must be within 30 minutes of the snapshot.")
+        term = options.term_structure(checked, day)
+        if not term.empty:
+            st.dataframe(term.round(2), width="stretch", hide_index=True)
+            st.caption("Straddle adds the call and put mids at the nearest shared strike. "
+                       "The one-standard-deviation range uses spot × annualized IV × √(days/365). "
+                       "30-day IV interpolates total variance and needs expiries bracketing 30 days.")
+            if pd.isna(latest):
+                st.caption("30-day IV needs a usable ATM call and put at 30 days or at expiries on both sides.")
         else:
-            observed = current["observed_at"].iloc[0].tz_convert(NEW_YORK)
-            st.caption(f"Chain captured {observed:%b %d, %Y at %I:%M %p %Z}. Spot ${current['spot'].iloc[0]:,.2f}.")
-            with st.expander("Quote quality and contract timestamps"):
-                st.dataframe(checked["quality"].value_counts().rename("Contracts"), width="stretch")
-                st.dataframe(checked[["contract", "expiry", "quote_at", "spot_at", "bid", "ask", "quality"]],
-                             width="stretch", hide_index=True)
-                st.caption("Quotes need standard verified terms, a positive bid, a spread no wider than 35% of mid, "
-                           "and spot within 20 minutes of the quote. Both must be within 30 minutes of the snapshot.")
-            term = options.term_structure(checked, day)
-            if not term.empty:
-                st.dataframe(term.round(2), width="stretch", hide_index=True)
-                st.caption("Straddle adds the call and put mids at the nearest shared strike. "
-                           "The one-standard-deviation range uses spot × annualized IV × √(days/365). "
-                           "30-day IV interpolates total variance and needs expiries bracketing 30 days.")
-                if pd.isna(latest):
-                    st.caption("30-day IV needs a usable ATM call and put at 30 days or at expiries on both sides.")
-            else:
-                st.caption("No expiration had a usable quote at this capture.")
-        oi, effective = options.open_interest(history, day)
-        vol_value, vol_count = options.put_call(checked.loc[checked["quality"].eq("Retained")], "volume")
-        oi_value, oi_count = options.put_call(oi, "oi")
-        st.caption(f"Put/call volume {_value(vol_value)} across {vol_count} quoted contracts. "
-                   f"Put/call OI {_value(oi_value)} across {oi_count} dated contracts.")
-        if oi.empty or oi["change"].isna().all():
-            st.caption(f"OI update or comparison pending. Expected effective date {effective:%b %d, %Y}.")
-        if not oi.empty:
-            with st.expander(f"Open interest effective {effective:%b %d, %Y}"):
-                st.dataframe(oi[["contract", "expiry", "strike", "side", "oi", "change"]], width="stretch",
-                             hide_index=True)
-                if not current.empty:
-                    _walls(oi, current["spot"].iloc[0], "oi", "dated open interest")
-        if current.empty:
-            st.caption("Gamma needs a chain and prior-session open interest.")
-        else:
-            at_capture = history.loc[history["available_at"].le(current["available_at"].iloc[0])]
+            st.caption("No expiration had a usable quote at this capture.")
+    oi, effective = options.open_interest(history, day)
+    vol_value, vol_count = options.put_call(checked.loc[checked["quality"].eq("Retained")], "volume")
+    oi_value, oi_count = options.put_call(oi, "oi")
+    st.caption(f"Put/call volume {_value(vol_value)} across {vol_count} quoted contracts. "
+               f"Put/call OI {_value(oi_value)} across {oi_count} dated contracts.")
+    if oi.empty or oi["change"].isna().all():
+        st.caption(f"OI update or comparison pending. Expected effective date {effective:%b %d, %Y}.")
+    if not oi.empty:
+        with st.expander(f"Open interest effective {effective:%b %d, %Y}"):
+            st.dataframe(oi[["contract", "expiry", "strike", "side", "oi", "change"]], width="stretch",
+                         hide_index=True)
+            if not current.empty:
+                _walls(oi, current["spot"].iloc[0], "oi", "dated open interest")
+    if current.empty:
+        st.caption("Gamma needs a chain and prior-session open interest.")
+    else:
+        at_capture = history.loc[history["available_at"].le(current["available_at"].iloc[0])]
+        aligned_oi, _ = options.open_interest(at_capture, day)
+        _gamma(checked, aligned_oi, day, session)
+    retained = checked.loc[checked["quality"].eq("Retained")]
+    zero = options.pre_expiry_chain(history, day)
+    if not zero.empty:
+        earlier = zero["observed_at"].iloc[0]
+        if (current.empty or earlier != current["observed_at"].iloc[0]
+                or zero["available_at"].iloc[0] != current["available_at"].iloc[0]):
+            st.caption(f"Earlier pre-expiry snapshot at {earlier.tz_convert(NEW_YORK):%I:%M %p %Z}.")
+            pre_expiry = options.assess_quotes(zero, day)
+            retained = pre_expiry.loc[pre_expiry["quality"].eq("Retained")]
+            at_capture = history.loc[history["available_at"].le(zero["available_at"].iloc[0])]
             aligned_oi, _ = options.open_interest(at_capture, day)
-            _gamma(checked, aligned_oi, day, session)
-        retained = checked.loc[checked["quality"].eq("Retained")]
-        zero = options.pre_expiry_chain(history, day)
-        if not zero.empty:
-            earlier = zero["observed_at"].iloc[0]
-            if (current.empty or earlier != current["observed_at"].iloc[0]
-                    or zero["available_at"].iloc[0] != current["available_at"].iloc[0]):
-                st.caption(f"Earlier pre-expiry snapshot at {earlier.tz_convert(NEW_YORK):%I:%M %p %Z}.")
-                pre_expiry = options.assess_quotes(zero, day)
-                retained = pre_expiry.loc[pre_expiry["quality"].eq("Retained")]
-                at_capture = history.loc[history["available_at"].le(zero["available_at"].iloc[0])]
-                aligned_oi, _ = options.open_interest(at_capture, day)
-                earlier_profile = options.gamma_profile(pre_expiry, aligned_oi, day)
-                if not earlier_profile.by_strike.empty:
-                    gross = earlier_profile.by_strike["exposure"].abs()
-                    zero_days = earlier_profile.by_strike["bucket"].eq(options.BUCKETS[0])
-                    if gross.sum():
-                        st.caption(f"0-day share of gross modeled gamma {gross.loc[zero_days].sum() / gross.sum():.1%} "
-                                   "at the pre-expiry snapshot.")
-            volume = retained["volume"].sum()
-            if volume > 0 and retained["volume"].notna().all():
-                share = retained.loc[retained["expiry"].eq(day), "volume"].sum() / volume
-                st.caption(f"0-day share of quoted-contract volume {share:.1%}.")
-        else:
-            st.caption("0-day concentration needs a timed snapshot before settlement.")
-        releases = issuer_research.earning_releases(session.inputs.research.known("estimates", cutoff, ticker))
-        moves = options.event_moves(history, releases, split)
-        if not moves.empty:
-            st.caption("Earnings moves use the last close before release and the first completed close after it. "
-                       "The options range uses the first eligible expiry covering that comparison.")
-            st.dataframe(moves.round(2), width="stretch", hide_index=True)
+            earlier_profile = options.gamma_profile(pre_expiry, aligned_oi, day)
+            if not earlier_profile.by_strike.empty:
+                gross = earlier_profile.by_strike["exposure"].abs()
+                zero_days = earlier_profile.by_strike["bucket"].eq(options.BUCKETS[0])
+                if gross.sum():
+                    st.caption(f"0-day share of gross modeled gamma {gross.loc[zero_days].sum() / gross.sum():.1%} "
+                               "at the pre-expiry snapshot.")
+        volume = retained["volume"].sum()
+        if volume > 0 and retained["volume"].notna().all():
+            share = retained.loc[retained["expiry"].eq(day), "volume"].sum() / volume
+            st.caption(f"0-day share of quoted-contract volume {share:.1%}.")
+    else:
+        st.caption("0-day concentration needs a timed snapshot before settlement.")
+    releases = issuer_research.earning_releases(session.inputs.research.known("estimates", cutoff, ticker))
+    moves = options.event_moves(history, releases, split)
+    if not moves.empty:
+        st.caption("Earnings moves use the last close before release and the first completed close after it. "
+                   "The options range uses the first eligible expiry covering that comparison.")
+        st.dataframe(moves.round(2), width="stretch", hide_index=True)
 
 
 def stock(session: "Session", ticker: str, split: pd.Series, fund: bool) -> None:
@@ -299,7 +302,6 @@ def stock(session: "Session", ticker: str, split: pd.Series, fund: bool) -> None
             st.dataframe(swings.round(2), width="stretch", hide_index=True)
             st.caption("Each split-adjusted level appears after the third confirming session closes.")
 
-    _chain(session, ticker, split, cutoff)
     with st.expander("Intraday VWAP and volume profile"):
         _source(session, "intraday")
         known = session.inputs.research.known("intraday", cutoff, ticker)
@@ -315,11 +317,12 @@ def stock(session: "Session", ticker: str, split: pd.Series, fund: bool) -> None
                 x=alt.X("Shares:Q", title="Reported shares"),
                 y=alt.Y("Bin low ($):Q", title="Quoted price ($)", scale=alt.Scale(zero=False)),
                 y2="Bin high ($):Q",
-                color=alt.condition(alt.datum["70% value area"], alt.value("#155CBE"), alt.value("#8797AE")),
+                color=alt.condition(alt.datum["70% value area"], alt.value(charts.COLORS[0]),
+                                    alt.value(charts.REFERENCE)),
                 tooltip=[alt.Tooltip("Bin low ($):Q", format=".2f"), alt.Tooltip("Bin high ($):Q", format=".2f"),
                          "Shares:Q", "70% value area:N", "Point of control:N"],
             ).properties(height=185)
-            st.altair_chart(chart, width="stretch", theme=None)
+            charts.render(chart)
             st.dataframe(profile.round(2), width="stretch", hide_index=True)
             with st.expander("Intraday bars and cumulative VWAP"):
                 st.dataframe(rows[["start_at", "end_at", "volume", "VWAP proxy"]].round(2), width="stretch",

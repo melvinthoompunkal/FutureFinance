@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import pandas as pd
@@ -39,22 +40,19 @@ def return_chart(session: Session, tickers: list[str]) -> None:
     if indexed.empty and indexed.shape[1]:
         st.info("The available price series have no overlapping session in this window.")
         return
-    charts.lines(indexed.reindex(session.dates), "Dividend-adjusted index", index_baseline=True)
+    charts.lines(indexed.reindex(session.dates), "Dividend-adjusted index", height=325, index_baseline=True)
 
 
-def stock(session: Session, ticker: str) -> None:
+def stock(session: Session, ticker: str, details=None) -> None:
     fund = ticker in FUNDS
     st.title(f"{ticker} {'fund' if fund else 'stock'} detail")
     members = session.inputs.members_on(session.day).set_index("symbol")
     sector_etf = session.inputs.sector_on(ticker, session.day)
     tickers = [ticker, sector_etf, BENCHMARK] if sector_etf else [ticker, BENCHMARK]
     split = session.split.get(ticker, pd.Series(index=session.split.index, dtype=float))
-    last_close = session.close[ticker].iloc[-1] if ticker in session.close else float("nan")
     move = calc.change(split, 1).iloc[-1]
-    event = next_earnings(session.inputs.earnings, ticker, session.day) if not fund else None
-    main, evidence = st.columns([3, 1.45], gap="large")
-    with main:
-        st.subheader("Relative performance", anchor="relative-performance")
+    performance, risk, options, research = st.tabs(["Performance", "Risk", "Options", "Research"])
+    with performance:
         return_chart(session, tickers)
         if sector_etf is None and not fund:
             st.caption("Sector mapping is unavailable for this stock on the selected session.")
@@ -63,35 +61,52 @@ def stock(session: Session, ticker: str) -> None:
             _relative_reading(session, sector_etf, BENCHMARK)
         if ticker != BENCHMARK:
             _relative_reading(session, ticker, BENCHMARK)
-    with evidence:
-        st.subheader("Price at the close")
-        st.metric("Quoted close", f"${last_close:,.2f}" if pd.notna(last_close) else "Unavailable")
-        if pd.isna(last_close) and ticker in session.close:
-            latest = session.close[ticker].last_valid_index()
-            if latest is not None:
-                st.caption(f"Last available quoted close was {latest:%b %d, %Y}.")
-        st.metric("Session change", signed(move))
-        gaps = calc.moving_average_gaps(split)
-        st.metric("Price trend", calc.trend(gaps))
-        st.caption("Distance from moving averages · " + " · ".join(
-            f"{window} sessions {signed(value)}" for window, value in gaps.items()
-        ))
-        if split.tail(200).count() < 200:
-            st.caption(f"{split.tail(200).count()} of 200 split-adjusted closes available.")
-        if not fund:
-            label = event.event_date.strftime("%b %d, %Y") if event is not None else "Unknown"
-            st.metric("Next earnings", label)
-            if event is not None:
-                source = session.inputs.issuer_sources.get("earnings", {}).get("label", "Synthetic calendar")
-                st.caption(f"{event.status.capitalize()} · {source} · {_publication_label(event.available_at)}")
-                if pd.notna(event.source_url):
-                    st.link_button("Open earnings announcement", event.source_url)
-            else:
-                _issuer_export_status(session, "earnings")
-    _risk(session, ticker, split)
-    if not fund:
-        _business(session, ticker, members, sector_etf, move)
-    research_views.stock(session, ticker, split, fund)
+    with risk:
+        _risk(session, ticker, split)
+    with options:
+        research_views.stock_options(session, ticker, split)
+    with research:
+        research_views.stock(session, ticker, split, fund)
+
+    with details if details is not None else nullcontext():
+        if fund:
+            _price_at_close(session, ticker, split, move)
+        else:
+            price, business = st.tabs(["At the close", "Business & valuation"])
+            with price:
+                _price_at_close(session, ticker, split, move)
+            with business:
+                _business(session, ticker, members, sector_etf, move)
+
+
+def _price_at_close(session: Session, ticker: str, split: pd.Series, move: float) -> None:
+    last_close = session.close[ticker].iloc[-1] if ticker in session.close else float("nan")
+    st.subheader("Price at the close")
+    st.metric("Quoted close", f"${last_close:,.2f}" if pd.notna(last_close) else "Unavailable")
+    if pd.isna(last_close) and ticker in session.close:
+        latest = session.close[ticker].last_valid_index()
+        if latest is not None:
+            st.caption(f"Last available quoted close was {latest:%b %d, %Y}.")
+    st.metric("Session change", signed(move))
+    gaps = calc.moving_average_gaps(split)
+    st.metric("Price trend", calc.trend(gaps))
+    st.caption("Distance from moving averages · " + " · ".join(
+        f"{window} sessions {signed(value)}" for window, value in gaps.items()
+    ))
+    count = split.tail(200).count()
+    if count < 200:
+        st.caption(f"{count} of 200 split-adjusted closes available.")
+    if ticker not in FUNDS:
+        event = next_earnings(session.inputs.earnings, ticker, session.day)
+        label = event.event_date.strftime("%b %d, %Y") if event is not None else "Unknown"
+        st.metric("Next earnings", label)
+        if event is not None:
+            source = session.inputs.issuer_sources.get("earnings", {}).get("label", "Synthetic calendar")
+            st.caption(f"{event.status.capitalize()} · {source} · {_publication_label(event.available_at)}")
+            if pd.notna(event.source_url):
+                st.link_button("Open earnings announcement", event.source_url)
+        else:
+            _issuer_export_status(session, "earnings")
 
 
 def _relative_reading(session: Session, ticker: str, benchmark: str) -> None:
@@ -155,14 +170,14 @@ def _business(session: Session, ticker: str, members: pd.DataFrame, sector_etf: 
 
     price_bars = session.inputs.bars_for(ticker)
     value = valuation(filing, price_bars, session.day)
-    revenue_col, margin_col, cash_col = st.columns(3)
+    revenue_col, margin_col = st.columns(2)
     revenue_col.metric("Quarterly revenue YoY", signed(health.growth))
     if filing.basis == "operating":
         margin_col.metric("Operating margin", f"{health.margin:.1f}%" if pd.notna(health.margin) else "Unavailable",
                           signed(health.margin_change, " pp YoY") if pd.notna(health.margin_change) else None,
                           delta_color="off")
         fcf = f"{'−' if health.fcf < 0 else ''}${abs(health.fcf) / 1e9:,.2f}B" if pd.notna(health.fcf) else "Unavailable"
-        cash_col.metric("Trailing free cash flow", fcf)
+        revenue_col.metric("Trailing free cash flow", fcf)
         revenue_col.metric("Gross debt / EBITDA", ratio(health.debt_to_ebitda))
         margin_col.metric("Interest coverage", ratio(health.coverage))
     else:

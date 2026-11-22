@@ -75,6 +75,18 @@ stock(Session(inputs, split, inputs.prices("total_return_close"), inputs.prices(
                          "Unavailable")
         self.assertFalse(app.exception)
 
+    def test_watchlist_lookup_opens_stock_with_the_selected_session_and_window(self):
+        app = self._app()
+        day = pd.Timestamp("2025-08-05")
+        app.selectbox[0].set_value(day).run()
+        app.selectbox[1].set_value(120).run()
+        app.selectbox(key="watchlist_lookup").select("RIVN").run()
+        self.assertFalse(app.exception)
+        self.assertEqual(app.radio(key="view").value, "Stock")
+        self.assertEqual(app.selectbox(key="stock_choice_selector").value, "RIVN")
+        self.assertEqual((app.selectbox[0].value, app.selectbox[1].value), (day, 120))
+        self.assertEqual(app.title[0].value, "RIVN stock detail")
+
     def test_market_opens_a_sector_that_led_while_falling(self):
         app = self._app()
         day = pd.Timestamp("2025-08-01")

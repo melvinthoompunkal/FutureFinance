@@ -13,11 +13,11 @@ python -m streamlit run app.py --server.port 8501
 
 Open [FutureFinance](http://127.0.0.1:8501). The server listens on the loopback interface. Edit [watchlist.txt](watchlist.txt) to change the stock picker.
 
-On **Market**, the August 8, 2025 sample shows SPY up 0.84% with only 38 of 100 members above their 50-session average. To see a sector outperform during a decline, pick August 1, 2025 and open **Financials (XLF)** from the market view. The selected session and chart window stay in place as you navigate. Expand **Session sources and coverage** to inspect dates and available inputs.
+On **Market**, the August 8, 2025 sample shows SPY up 0.84% with only 38 of 100 members above their 50-session average. Use **Participation** to see the breadth chart. To see a sector outperform during a decline, pick August 1, 2025 and open **Financials (XLF)** from **Sector drilldown**. The selected session and chart window stay in place as you navigate. Expand **Session sources and coverage** to inspect dates and available inputs.
 
-On August 8, open **Technology (XLK)** and select **AAPL**, or choose AAPL directly in **Stock**. The synthetic example shows a rising close and lower operating margin. Choose **RIVN** to see loss-making trailing earnings or **CRCL** to see how the dashboard handles a recent listing and an unknown sector. Expand **Dividend-adjusted index chart data** to see the plotted returns as a table.
+On August 8, open **Technology (XLK)** and select **AAPL** from the sector members, or find AAPL in the **Watchlist**. The synthetic example shows a rising close and a lower operating margin under **Business & valuation**. Choose **RIVN** to see loss-making trailing earnings or **CRCL** to see how the dashboard handles a recent listing and an unknown sector. Expand **Dividend-adjusted index chart data** to see the plotted returns as a table.
 
-For Phase 5, open **Sector rotation** and **Seven-day headline tone** under Sector. Under AAPL Stock, open **Options, implied moves and positioning** to compare the straddle with the IV-based move and inspect the chain and dated open interest. CRCL shows the state for a symbol with no chain history.
+Use **Rotation & news** on the sector view for sector rotation and seven-day headline tone. Open **Options** on AAPL to compare the straddle with the IV-based move and inspect the chain and dated open interest. CRCL shows the state for a symbol with no chain history.
 
 ## Try a local price export
 
