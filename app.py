@@ -84,10 +84,10 @@ except (OSError, ValueError, sqlite3.Error) as error:
 
 with st.container(key="toolbar"):
     brand, nav, day_control, window_control = st.columns([1, 2, 1, .85], vertical_alignment="center")
-    brand.html('<div class="ff-brand"><span aria-hidden="true" class="ff-mark"></span>FutureFinance</div>')
+    brand.html('<div class="ff-brand">FutureFinance</div>')
     with nav:
         view = st.radio("View", ["Market", "Sector", "Stock"], horizontal=True, key="view",
-                        format_func={"Market": "Market Overview", "Sector": "Sectors", "Stock": "Stock Analysis"}.get,
+                        format_func={"Market": "Market", "Sector": "Sectors", "Stock": "Stocks"}.get,
                         label_visibility="collapsed")
     with day_control:
         day = st.selectbox("Archived session (ET)" if publications else "Session (ET)", published,
@@ -123,7 +123,6 @@ with st.container(key="workspace"):
     details = st.container(key="evidence-panel")
     ticker = None
     with rail:
-        workspace.sector_leadership(session)
         with st.container(key="watchlist-panel"):
             st.subheader("Watchlist")
             if view == "Stock":
@@ -133,11 +132,13 @@ with st.container(key="workspace"):
                     ticker = choose("Watchlist symbol", options, "stock_choice", options[0])
             elif watchlist:
                 st.selectbox("Watchlist symbol", watchlist, index=None, placeholder="Find a symbol",
+                             label_visibility="collapsed",
                              key="watchlist_lookup", on_change=open_watchlist_stock)
             if watchlist:
                 workspace.watchlist_quotes(session, watchlist, ticker)
             else:
                 st.caption("Add symbols to watchlist.txt.")
+        workspace.sector_leadership(session)
 
     with main:
         if view == "Market":

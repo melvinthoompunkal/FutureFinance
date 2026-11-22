@@ -34,7 +34,7 @@ class PreviewTests(unittest.TestCase):
 
     def test_drilldown_preserves_context_and_shows_filing_cutoff(self):
         app = self._app()
-        self.assertIn("38% · Narrow", [metric.value for metric in app.metric])
+        self.assertIn("38:gray[%] · Narrow", [metric.value for metric in app.metric])
         app.selectbox[1].set_value(120).run()
         app.radio(key="view").set_value("Sector").run()
         self.assertEqual(app.title[0].value, "Sector leadership")
@@ -44,10 +44,10 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(app.title[0].value, "AAPL stock detail")
         self.assertEqual(app.selectbox[0].value, pd.Timestamp("2025-08-08"))
         self.assertEqual(app.selectbox[1].value, 120)
-        self.assertIn("+1.30%", [metric.value for metric in app.metric])
+        self.assertIn("+1.30:gray[%]", [metric.value for metric in app.metric])
         self.assertTrue(any("operating margin was lower" in item.value for item in app.markdown))
         self.assertEqual(next(metric.delta for metric in app.metric if metric.label == "Operating margin"),
-                         "-2.00 pp YoY")
+                         "-2.00 :gray[pp] YoY")
         self.assertTrue(any("XLK peer median" in note.value and "2 eligible" in note.value for note in app.caption))
 
         app.selectbox(key="stock_choice_selector").select("RIVN").run()

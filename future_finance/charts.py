@@ -4,24 +4,25 @@ import streamlit as st
 
 from .analytics import change
 
-COLORS = ["#7BD0FF", "#C6AEFF", "#68E0BA"]
-REFERENCE = "#8094AE"
-GAIN = "#45DFA4"
-LOSS = "#FA829B"
-AXIS_FONT = "JetBrains Mono, Consolas, monospace"
+COLORS = ["#B5A7F5", "#A0A1AA", "#71727B"]
+REFERENCE = "#71727B"
+GAIN = "#6EC49C"
+LOSS = "#EE9397"
+AXIS_FONT = "IBM Plex Mono"
 
 
 def render(chart) -> None:
     st.altair_chart(chart.configure(
         background="transparent",
-        font="Inter, Segoe UI, sans-serif",
+        font="IBM Plex Sans",
         view=alt.ViewConfig(stroke=None),
         axis=alt.AxisConfig(
-            gridColor="#34455D", gridOpacity=.60, gridDash=[2, 4], domain=False, ticks=False,
-            labelColor="#B7C6D9", titleColor="#C9D6E8", labelPadding=7, titlePadding=10,
+            gridColor="#303137", gridOpacity=.72, domain=False, ticks=False,
+            labelColor="#A0A1AA", titleColor="#A0A1AA", labelPadding=5, titlePadding=8,
             labelFont=AXIS_FONT, labelFontSize=10, titleFontSize=11, titleFontWeight="normal",
+            titleFont="IBM Plex Sans",
         ),
-        legend=alt.LegendConfig(labelColor="#D8E6F6", titleColor="#C0CFE1", labelFontSize=12),
+        legend=alt.LegendConfig(labelColor="#EBEBEE", titleColor="#A0A1AA", labelFontSize=11),
     ), width="stretch", theme=None)
 
 
@@ -41,7 +42,8 @@ def daily_price(bars: pd.DataFrame, dates: pd.DatetimeIndex, ticker: str) -> Non
     time = alt.X("Session:T", title=None,
                  scale=alt.Scale(type="utc", domain=[dates[0] - margin, dates[-1] + margin], nice=False))
     price = alt.Y(field="split_close", type="quantitative", title="Price (USD)", scale=alt.Scale(zero=False),
-                  axis=alt.Axis(orient="right", minExtent=54, maxExtent=54, tickCount=5, format="$.2f"))
+                  axis=alt.Axis(orient="right", minExtent=54, maxExtent=54, tickCount=5, format=",.2f",
+                                labelAlign="right", labelPadding=49))
     color = (alt.when(alt.datum.move > 0).then(alt.value(GAIN))
              .when(alt.datum.move < 0).then(alt.value(LOSS)).otherwise(alt.value(REFERENCE)))
     tooltip = [alt.Tooltip("Session:T", format="%b %d, %Y"),
@@ -59,13 +61,14 @@ def daily_price(bars: pd.DataFrame, dates: pd.DatetimeIndex, ticker: str) -> Non
     has_range = data[["split_low", "split_high"]].notna().all(axis=1).any()
     with st.container(key="price-plot"):
         if show_price:
-            render((ranges + line if has_range else line).properties(height=270))
+            render((ranges + line if has_range else line).properties(height=238))
         if show_volume:
-            volume_axis = alt.Axis(orient="right", minExtent=54, maxExtent=54, tickCount=3, format="~s")
+            volume_axis = alt.Axis(orient="right", minExtent=54, maxExtent=54, tickCount=3, format="~s",
+                                   labelAlign="right", labelPadding=49)
             volume = alt.Chart(data).mark_bar(size=4, opacity=.72).encode(
                 x=time.axis(date_axis), y=alt.Y("volume:Q", title="Volume", axis=volume_axis),
                 color=color, tooltip=tooltip,
-            ).properties(height=104)
+            ).properties(height=72)
             render(volume)
     with st.expander("Daily price and volume data"):
         table = data.set_index("Session")[["split_high", "split_low", "split_close", "volume"]]
@@ -117,9 +120,10 @@ def sector_bars(ranking: pd.DataFrame) -> None:
         alt.Chart(data).mark_bar(size=13, cornerRadius=3)
         .encode(
             x=alt.X("20 sessions:Q", title="Relative return (%)",
-                    scale=alt.Scale(domain=[-span, span]), axis=alt.Axis(format="+.1f")),
+                    scale=alt.Scale(domain=[-span, span]), axis=alt.Axis(format="+.1f", tickCount=7)),
             y=alt.Y("ETF:N", title=None, sort=list(data["ETF"]), axis=alt.Axis(labelFontSize=12)),
-            color=alt.condition(alt.datum["20 sessions"] >= 0, alt.value(GAIN), alt.value(LOSS)),
+            color=(alt.when(alt.datum["20 sessions"] > 0).then(alt.value(GAIN))
+                   .when(alt.datum["20 sessions"] < 0).then(alt.value(LOSS)).otherwise(alt.value(REFERENCE))),
             tooltip=["Sector:N", alt.Tooltip("20 sessions:Q", title="vs. SPY (%)", format="+.2f"),
                      alt.Tooltip("Absolute, 20 sessions:Q", title="Absolute (%)", format="+.2f")],
         )

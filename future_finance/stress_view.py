@@ -2,6 +2,7 @@ import pandas as pd
 import streamlit as st
 
 from . import analytics as calc, charts
+from .presentation import quantity_markdown
 from .stress import CREDIT_LOOKBACK, VIX_LOOKBACK, stress_history, vix_percentile
 from .views import Session, signed
 
@@ -18,7 +19,7 @@ def _credit_proxy(session: Session) -> None:
         st.caption("The credit proxy needs dividend-adjusted HYG and IEF closes on a common session.")
         return
     move = calc.change(proxy, CREDIT_LOOKBACK).loc[latest]
-    st.metric("HYG / IEF credit proxy", signed(move))
+    st.metric("HYG / IEF credit proxy", quantity_markdown(signed(move)))
     st.caption(f"20-session change in the dividend-adjusted ETF ratio through {latest:%b %d, %Y}. "
                f"Price source: {session.inputs.source}.")
     visible = proxy.loc[session.dates]
@@ -46,7 +47,7 @@ def market_stress(session: Session) -> None:
                        "Ties count as half an observation.")
     with middle:
         ratio = values.at[pair_day, "VIX / VIX3M"] if pair_day is not None else None
-        st.metric("VIX / VIX3M", f"{ratio:.2f}×" if ratio is not None else "Unavailable")
+        st.metric("VIX / VIX3M", quantity_markdown(f"{ratio:.2f}×" if ratio is not None else "Unavailable"))
         if three_month_day is not None:
             st.caption(f"VIX3M close {values.at[three_month_day, 'VIX3M']:.2f}. "
                        f"{_observation(session, 'VIX3M', three_month_day)}")
@@ -60,7 +61,7 @@ def market_stress(session: Session) -> None:
             st.caption("The ratio needs VIX and VIX3M closes from the same session.")
     with right:
         spread = values.at[spread_day, "High-yield spread"] if spread_day is not None else None
-        st.metric("High-yield spread", f"{spread:.0f} bp" if spread is not None else "Unavailable")
+        st.metric("High-yield spread", quantity_markdown(f"{spread:.0f} bp" if spread is not None else "Unavailable"))
         st.caption(_observation(session, "OAS", spread_day))
         if spread_day is not None:
             shift = values.at[spread_day, "Spread change"]

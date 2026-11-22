@@ -9,6 +9,7 @@ from . import analytics as calc, charts
 from . import research_views
 from .inputs import Inputs
 from .issuer_inputs import FINANCIAL_FIELDS
+from .presentation import quantity_html, quantity_markdown
 from .scope import BENCHMARK, NEW_YORK, SECTORS
 from .stock import FUNDS, business_health, filing_url, filings_as_of, next_earnings, peer_valuations, price_risk, valuation
 
@@ -50,7 +51,8 @@ def price_heading(title: str, caption: str, close: float, move: float) -> None:
         change = signed(move) if pd.notna(move) else "—"
         tone = "gain" if move > 0 else "loss" if move < 0 else "flat"
         quote.html(f'<div class="ff-heading-quote" aria-label="Quoted close {price}, session change {change}">'
-                   f'<strong>{price}</strong><span class="ff-market-delta ff-{tone}">{change}</span></div>')
+                   f'<strong>{quantity_html(price)}</strong>'
+                   f'<span class="ff-market-delta ff-{tone}">{quantity_html(change)}</span></div>')
 
 
 def price_and_volume(session: Session, ticker: str) -> None:
@@ -59,9 +61,9 @@ def price_and_volume(session: Session, ticker: str) -> None:
     fields = (
         ("High", latest["split_high"]), ("Low", latest["split_low"]), ("Close", latest["split_close"]),
     )
-    readings = [f'<div><dt>{label}</dt><dd>{f"${value:,.2f}" if pd.notna(value) else "—"}</dd></div>'
+    readings = [f'<div><dt>{label}</dt><dd>{quantity_html(f"${value:,.2f}" if pd.notna(value) else "—")}</dd></div>'
                 for label, value in fields]
-    readings.append(f'<div><dt>Volume</dt><dd>{format_volume(latest["volume"])}</dd></div>')
+    readings.append(f'<div><dt>Volume</dt><dd>{quantity_html(format_volume(latest["volume"]))}</dd></div>')
     st.html(f'<dl class="ff-price-strip" aria-label="{escape(ticker)} split-adjusted prices and reported volume">'
             f'{"".join(readings)}</dl>')
     charts.daily_price(bars, session.dates, ticker)
@@ -125,12 +127,12 @@ def stock(session: Session, ticker: str, details=None) -> None:
 def _price_at_close(session: Session, ticker: str, split: pd.Series, move: float) -> None:
     last_close = session.close[ticker].iloc[-1] if ticker in session.close else float("nan")
     st.subheader("Price at the close")
-    st.metric("Quoted close", f"${last_close:,.2f}" if pd.notna(last_close) else "Unavailable")
+    st.metric("Quoted close", quantity_markdown(f"${last_close:,.2f}" if pd.notna(last_close) else "Unavailable"))
     if pd.isna(last_close) and ticker in session.close:
         latest = session.close[ticker].last_valid_index()
         if latest is not None:
             st.caption(f"Last available quoted close was {latest:%b %d, %Y}.")
-    st.metric("Session change", signed(move))
+    st.metric("Session change", quantity_markdown(signed(move)))
     gaps = calc.moving_average_gaps(split)
     st.metric("Price trend", calc.trend(gaps))
     st.caption("Distance from moving averages · " + " · ".join(
@@ -172,7 +174,7 @@ def _risk(session: Session, ticker: str, split: pd.Series) -> None:
             formatted = signed(value)
         else:
             formatted = f"{value:.2f}%" if pd.notna(value) else "Unavailable"
-        columns[index % len(columns)].metric(label, formatted)
+        columns[index % len(columns)].metric(label, quantity_markdown(formatted))
     with st.expander("Price sources and calculation windows"):
         st.write(f"Daily prices from {session.inputs.source} through {session.day:%b %d, %Y}.")
         st.write("The 14-session average true range uses split-adjusted highs, lows and previous closes. "
@@ -214,15 +216,15 @@ def _business(session: Session, ticker: str, members: pd.DataFrame, sector_etf: 
     price_bars = session.inputs.bars_for(ticker)
     value = valuation(filing, price_bars, session.day)
     revenue_col, margin_col = st.columns(2)
-    revenue_col.metric("Quarterly revenue YoY", signed(health.growth))
+    revenue_col.metric("Quarterly revenue YoY", quantity_markdown(signed(health.growth)))
     if filing.basis == "operating":
-        margin_col.metric("Operating margin", f"{health.margin:.1f}%" if pd.notna(health.margin) else "Unavailable",
-                          signed(health.margin_change, " pp YoY") if pd.notna(health.margin_change) else None,
-                          delta_color="off")
+        margin = f"{health.margin:.1f}%" if pd.notna(health.margin) else "Unavailable"
+        delta = quantity_markdown(signed(health.margin_change, " pp YoY")) if pd.notna(health.margin_change) else None
+        margin_col.metric("Operating margin", quantity_markdown(margin), delta, delta_color="off", delta_arrow="off")
         fcf = f"{'−' if health.fcf < 0 else ''}${abs(health.fcf) / 1e9:,.2f}B" if pd.notna(health.fcf) else "Unavailable"
-        revenue_col.metric("Trailing free cash flow", fcf)
-        revenue_col.metric("Gross debt / EBITDA", ratio(health.debt_to_ebitda))
-        margin_col.metric("Interest coverage", ratio(health.coverage))
+        revenue_col.metric("Trailing free cash flow", quantity_markdown(fcf))
+        revenue_col.metric("Gross debt / EBITDA", quantity_markdown(ratio(health.debt_to_ebitda)))
+        margin_col.metric("Interest coverage", quantity_markdown(ratio(health.coverage)))
     else:
         margin_col.caption("Operating margin, cash flow and leverage comparisons are inapplicable for this "
                            "reporting basis.")
@@ -250,8 +252,9 @@ def _business(session: Session, ticker: str, members: pd.DataFrame, sector_etf: 
     st.subheader("Valuation")
     pe, cash = st.columns(2)
     pe.metric("Trailing P/E", "Inapplicable" if filing.basis == "reit" else
-              "Loss-making" if value.loss_making else ratio(value.pe))
-    cash.metric("Free cash flow yield", signed(value.fcf_yield) if filing.basis == "operating" else "Inapplicable")
+              "Loss-making" if value.loss_making else quantity_markdown(ratio(value.pe)))
+    cash.metric("Free cash flow yield", quantity_markdown(signed(value.fcf_yield))
+                if filing.basis == "operating" else "Inapplicable")
     if sector_etf:
         peers = peer_valuations(session.inputs, members, filings, ticker, filing, sector_etf, session.day)
         for column, measure, formatter in ((pe, "Trailing P/E", ratio), (cash, "FCF yield (%)", signed)):

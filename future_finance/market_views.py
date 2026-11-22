@@ -3,6 +3,7 @@ import streamlit as st
 
 from . import analytics as calc, charts
 from . import research_views
+from .presentation import quantity_markdown
 from .scope import BENCHMARK, COMPARISON, SECTORS
 from .stress_view import market_stress
 from .views import Session, price_and_volume, price_heading, return_chart, signed
@@ -23,7 +24,7 @@ def _breadth_evidence(history: dict, day: pd.Timestamp, earlier: pd.Timestamp | 
         previous = readings.get(earlier)
         percent = reading.percent
         text = f"{percent:.0f}% · {reading.label}" if percent is not None else reading.label
-        st.metric(f"Above {window}-session average", text)
+        st.metric(f"Above {window}-session average", quantity_markdown(text))
         if reading.expected:
             details = f"{reading.above} above · {reading.eligible} of {reading.expected} eligible"
             if previous is not None and previous.percent is not None and percent is not None:
@@ -171,9 +172,10 @@ def _market_trend(session: Session, gaps: dict[int, float]) -> None:
 
 def _ranking_table(ranking: pd.DataFrame) -> None:
     st.dataframe(ranking, width="stretch", column_config={
-        column: st.column_config.NumberColumn(format="%+.2f%%")
+        column: st.column_config.NumberColumn(label=f"{column} (%)", format="%+.2f")
         for column in ranking.columns if "sessions" in column
-    } | {"Breadth (50)": st.column_config.NumberColumn(format="%.1f%%")})
+    } | {"Breadth (50)": st.column_config.NumberColumn(label="Breadth (50) (%)", format="%.1f"),
+         "Eligible members": {"alignment": "right"}})
 
 
 def _sector_summary(chosen: str, relative: float, absolute: float) -> None:

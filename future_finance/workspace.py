@@ -6,7 +6,8 @@ import pandas as pd
 import streamlit as st
 
 from . import analytics as calc
-from .charts import GAIN, LOSS, REFERENCE
+from .charts import REFERENCE
+from .presentation import quantity_html
 from .scope import BENCHMARK, COMPARISON, SECTORS
 from .views import Session, format_volume, signed
 
@@ -27,7 +28,7 @@ def _tone(move: float) -> str:
     return "gain" if move > 0 else "loss"
 
 
-def _sparkline(series: pd.Series, tone: str) -> str:
+def _sparkline(series: pd.Series) -> str:
     valid = series.dropna()
     if len(valid) < 2:
         return ""
@@ -42,14 +43,13 @@ def _sparkline(series: pd.Series, tone: str) -> str:
             lines.append(f'<polyline points="{" ".join(segment)}" />')
     if not lines:
         return ""
-    color = {"gain": GAIN, "loss": LOSS, "flat": REFERENCE}[tone]
-    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 88 34" fill="none" stroke="{color}" '
+    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 88 34" fill="none" stroke="{REFERENCE}" '
            f'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">{"".join(lines)}</svg>')
     encoded = b64encode(svg.encode("ascii")).decode("ascii")
     return f'<img class="ff-sparkline" src="data:image/svg+xml;base64,{encoded}" alt="">'
 
 
-def _breadth_card(session: Session) -> str:
+def _breadth_summary(session: Session) -> str:
     members = calc.breadth_members(session.inputs, session.split.tail(200), session.dates[-1:])
     heading = '<div class="ff-breadth-heading"><h2>Market breadth</h2><span>End of day</span></div>'
     if members.empty:
@@ -62,8 +62,8 @@ def _breadth_card(session: Session) -> str:
         else:
             up, down = int(changes.gt(0).sum()), int(changes.lt(0).sum())
             flat = len(changes) - up - down
-            content = (f'<div class="ff-breadth-counts"><span class="ff-gain">{up:,} advancing</span>'
-                       f'<span class="ff-loss">{down:,} declining</span></div>'
+            content = (f'<div class="ff-breadth-counts"><span>Advancers <strong class="ff-gain">{up:,}</strong></span>'
+                       f'<span>Decliners <strong class="ff-loss">{down:,}</strong></span></div>'
                        '<div class="ff-breadth-track" aria-hidden="true">'
                        f'<span style="width:{up / len(changes):.3%}"></span>'
                        f'<span style="width:{down / len(changes):.3%}"></span></div>'
@@ -74,28 +74,29 @@ def _breadth_card(session: Session) -> str:
         value = reading.percent
         display = f"{value:.0f}%" if value is not None else "—"
         note = f"{reading.eligible:,} of {reading.expected:,} members eligible"
-        averages.append(f'<div><dt>Above {window}D average</dt><dd title="{note}">{display}</dd></div>')
-    return f'<article class="ff-breadth-card">{heading}{content}<dl>{"".join(averages)}</dl></article>'
+        averages.append(f'<div><dt>Above {window}D avg.</dt><dd title="{note}">{quantity_html(display)}</dd></div>')
+    return f'<article class="ff-breadth">{heading}{content}<dl>{"".join(averages)}</dl></article>'
 
 
 def market_snapshot(session: Session) -> None:
     closes = session.close.reindex(columns=MARKET_PROXIES).iloc[-1]
     prices = session.split.reindex(columns=MARKET_PROXIES).tail(20)
     changes = calc.change(prices, 1).iloc[-1]
-    cards = []
+    quotes = []
     for symbol, label in MARKET_PROXIES.items():
         close, move = closes[symbol], changes[symbol]
         tone = _tone(move)
         price = f"${close:,.2f}" if pd.notna(close) else "—"
         delta = signed(move) if pd.notna(move) else "—"
-        cards.append(f'<article class="ff-market-card" aria-label="{escape(label)} ETF proxy ({symbol})">'
-                     f'<div class="ff-market-label"><h2>{escape(label)}</h2><span>{symbol}</span></div>'
-                     f'<div class="ff-market-delta ff-{tone}" aria-label="Session change {delta}">{delta}</div>'
-                     f'<div class="ff-market-price" aria-label="Quoted close {price}">{price}</div>'
-                     f'{_sparkline(prices[symbol], tone)}</article>')
+        quotes.append(f'<article class="ff-market-quote" aria-label="{escape(label)} ETF proxy ({symbol})">'
+                      f'<div class="ff-market-label"><h2>{symbol}</h2><span>{escape(label)}</span></div>'
+                      f'<div><div class="ff-market-price" aria-label="Quoted close {price}">{quantity_html(price)}</div>'
+                      f'<div class="ff-market-delta ff-{tone}" aria-label="Session change {delta}">'
+                      f'{quantity_html(delta)}</div></div>'
+                      f'{_sparkline(prices[symbol])}</article>')
     st.html('<section class="ff-snapshot" aria-label="Market snapshot">'
-            '<div class="ff-market-strip" role="group" aria-label="Benchmark ETF quotes" tabindex="0">'
-            f'{"".join(cards)}</div>{_breadth_card(session)}</section>')
+            '<div class="ff-market-strip" role="group" aria-label="Benchmark ETF quotes">'
+            f'{"".join(quotes)}</div>{_breadth_summary(session)}</section>')
 
 
 def sector_leadership(session: Session) -> None:
@@ -111,9 +112,10 @@ def sector_leadership(session: Session) -> None:
         rows = []
         for symbol, move in extremes.items():
             width = abs(move) / scale if scale else 0
-            rows.append(f'<li><span>{SECTORS[symbol]}</span><strong class="ff-{_tone(move)}">{signed(move)}</strong>'
+            rows.append(f'<li><span>{SECTORS[symbol]}</span>'
                         f'<span class="ff-sector-track" aria-hidden="true">'
-                        f'<span class="ff-{_tone(move)}" style="width:{width:.3%}"></span></span></li>')
+                        f'<span class="ff-{_tone(move)}" style="width:{width:.3%}"></span></span>'
+                        f'<strong class="ff-{_tone(move)}">{quantity_html(signed(move))}</strong></li>')
         st.html('<p class="ff-sector-period">Daily ETF returns</p>'
                 f'<ul class="ff-sector-moves" aria-label="Sector ETF session returns">{"".join(rows)}</ul>')
 
@@ -130,7 +132,8 @@ def watchlist_quotes(session: Session, symbols: list[str], selected: str | None)
         change = signed(move) if pd.notna(move) else "—"
         active = ' class="ff-selected-quote"' if symbol == selected else ""
         rows.append(f'<tr{active}><th scope="row">{escape(symbol)}</th>'
-                    f'<td>{price}</td><td class="ff-{_tone(move)}">{change}</td><td>{format_volume(volume)}</td></tr>')
+                    f'<td>{quantity_html(price)}</td><td class="ff-{_tone(move)}">{quantity_html(change)}</td>'
+                    f'<td>{quantity_html(format_volume(volume))}</td></tr>')
     st.html('<div class="ff-watchlist-scroll" tabindex="0" role="region" aria-label="Watchlist quote table">'
             '<table class="ff-quotes">'
             '<thead><tr><th scope="col">Symbol</th><th scope="col">Close</th>'

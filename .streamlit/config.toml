@@ -1,14 +1,57 @@
 [server]
 address = "127.0.0.1"
 headless = true
+enableStaticServing = true
 
 [browser]
 gatherUsageStats = false
 
 [theme]
 base = "dark"
-primaryColor = "#8ED5FF"
-backgroundColor = "#070B16"
-secondaryBackgroundColor = "#15213A"
-textColor = "#EEF2FC"
-font = "sans serif"
+primaryColor = "#B5A7F5"
+backgroundColor = "#0C0D0F"
+secondaryBackgroundColor = "#17181B"
+textColor = "#EBEBEE"
+borderColor = "#303137"
+dataframeBorderColor = "#303137"
+dataframeHeaderBackgroundColor = "#1D1E23"
+greenColor = "#6EC49C"
+greenTextColor = "#6EC49C"
+redColor = "#EE9397"
+redTextColor = "#EE9397"
+grayTextColor = "#A0A1AA"
+linkColor = "#B5A7F5"
+font = "IBM Plex Mono Digits, IBM Plex Sans"
+headingFont = "IBM Plex Mono Digits, IBM Plex Sans"
+codeFont = "IBM Plex Mono"
+baseFontSize = 14
+baseRadius = "6px"
+buttonRadius = "6px"
+showWidgetBorder = true
+
+[[theme.fontFaces]]
+family = "IBM Plex Sans"
+url = "app/static/fonts/ibm-plex-sans.woff2"
+weight = "400 650"
+
+[[theme.fontFaces]]
+family = "IBM Plex Mono"
+url = "app/static/fonts/ibm-plex-mono-400.woff2"
+weight = "400"
+
+[[theme.fontFaces]]
+family = "IBM Plex Mono"
+url = "app/static/fonts/ibm-plex-mono-500.woff2"
+weight = "500"
+
+[[theme.fontFaces]]
+family = "IBM Plex Mono"
+url = "app/static/fonts/ibm-plex-mono-600.woff2"
+weight = "600"
+
+# Native widget and table text uses Plex Sans with Plex Mono digits.
+[[theme.fontFaces]]
+family = "IBM Plex Mono Digits"
+url = "app/static/fonts/ibm-plex-mono-400.woff2"
+weight = "400 650"
+unicodeRange = "U+0030-0039"

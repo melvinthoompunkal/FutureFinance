@@ -8,6 +8,7 @@ import streamlit as st
 
 from . import charts, issuer_research, market_research, options, technical
 from .market_calendar import capture_cutoff
+from .presentation import quantity_markdown
 from .scope import NEW_YORK, SECTORS
 from .stock import price_risk
 from .stress import stress_history
@@ -127,7 +128,7 @@ def _gamma(checked, oi, day, session):
     put = -exposure.loc[exposure["side"].eq("put"), "exposure"].sum()
     net = call - put
     fraction = abs(net) / (call + put) if call + put > 0 else float("nan")
-    st.metric("Modeled net gamma per 1% spot move", _value(net, prefix="$"))
+    st.metric("Modeled net gamma per 1% spot move", quantity_markdown(_value(net, prefix="$")))
     st.caption(f"Gross calls ${call:,.0f}, gross puts ${put:,.0f}. "
                f"Absolute net / gross {_value(fraction * 100, '%')}. "
                f"{profile.modelled} of {profile.contracts} contracts modeled.")
@@ -198,9 +199,9 @@ def stock_options(session: "Session", ticker: str, split: pd.Series) -> None:
     count, rank, percentile = options.iv_reading(sample)
     latest = sample.iloc[-1]
     left, middle, right = st.columns(3)
-    left.metric("30-day ATM IV", _value(latest, "%"))
-    middle.metric("IV rank", _value(rank, "%"))
-    right.metric("IV percentile", _value(percentile, "%"))
+    left.metric("30-day ATM IV", quantity_markdown(_value(latest, "%")))
+    middle.metric("IV rank", quantity_markdown(_value(rank, "%")))
+    right.metric("IV percentile", quantity_markdown(_value(percentile, "%")))
     status = "Collecting history" if count < 60 else "Provisional window" if count < 252 else "Full 252 sessions"
     st.caption(f"{status}. {count} valid observations in the latest 252 sessions. "
                "Rank measures position in the observed range. Percentile counts readings strictly below today's.")
@@ -310,7 +311,7 @@ def stock(session: "Session", ticker: str, split: pd.Series, fund: bool) -> None
             st.caption(f"VWAP and profile require complete regular-session bars with volume. "
                        f"{len(rows)} bars available in the session.")
         else:
-            st.metric("Session VWAP approximation", _value(rows["VWAP proxy"].iloc[-1], prefix="$"))
+            st.metric("Session VWAP approximation", quantity_markdown(_value(rows["VWAP proxy"].iloc[-1], prefix="$")))
             st.caption("Uses each bar's typical price and reported volume. The 70% volume area expands from the "
                        "largest bin. Volume represents the venue coverage listed above.")
             chart = alt.Chart(profile).mark_bar().encode(

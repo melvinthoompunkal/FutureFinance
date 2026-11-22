@@ -153,8 +153,8 @@ class ArchiveTests(unittest.TestCase):
         self.assertFalse(app.exception)
         metrics = {metric.label: metric.value for metric in app.metric}
         self.assertEqual(metrics["VIX close"], "24.00")
-        self.assertEqual(metrics["VIX / VIX3M"], "0.90×")
-        self.assertEqual(metrics["High-yield spread"], "425 bp")
+        self.assertEqual(metrics["VIX / VIX3M"], "0.90:gray[×]")
+        self.assertEqual(metrics["High-yield spread"], "425 :gray[bp]")
         self.assertTrue(any("widening" in item.value and "+75.00 bp" in item.value for item in app.caption))
 
     def test_concurrent_retries_leave_one_publication(self):
@@ -218,7 +218,7 @@ class ArchiveTests(unittest.TestCase):
         app = AppTest.from_file(str(app_path)).run()
         app.radio(key="view").set_value("Stock").run()
         self.assertFalse(app.exception)
-        self.assertIn("$96.18B", [metric.value for metric in app.metric])
+        self.assertIn(":gray[$]96.18:gray[B]", [metric.value for metric in app.metric])
         self.assertTrue(any("Jun 28, 2025" in note.value and "06:00:42 AM ET" in note.value for note in app.caption))
         self.assertEqual(app.get("link_button")[0].proto.url, apple["url"])
 
