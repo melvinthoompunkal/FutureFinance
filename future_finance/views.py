@@ -1,5 +1,6 @@
 from contextlib import nullcontext
 from dataclasses import dataclass
+from html import escape
 
 import pandas as pd
 import streamlit as st
@@ -8,12 +9,21 @@ from . import analytics as calc, charts
 from . import research_views
 from .inputs import Inputs
 from .issuer_inputs import FINANCIAL_FIELDS
-from .scope import BENCHMARK, NEW_YORK
+from .scope import BENCHMARK, NEW_YORK, SECTORS
 from .stock import FUNDS, business_health, filing_url, filings_as_of, next_earnings, peer_valuations, price_risk, valuation
 
 
 def signed(value: float | None, suffix: str = "%") -> str:
     return "Unavailable" if pd.isna(value) else f"{value:+.2f}{suffix}"
+
+
+def format_volume(value: float) -> str:
+    if pd.isna(value):
+        return "—"
+    for divisor, suffix in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if value >= divisor:
+            return f"{value / divisor:.1f}{suffix}"
+    return f"{value:,.0f}"
 
 
 @dataclass
@@ -28,6 +38,34 @@ class Session:
     @property
     def day(self) -> pd.Timestamp:
         return self.dates[-1]
+
+
+def price_heading(title: str, caption: str, close: float, move: float) -> None:
+    with st.container(key="price-heading"):
+        heading, quote = st.columns([2, 1], gap="small")
+        heading.title(title)
+        if caption:
+            heading.caption(caption)
+        price = f"${close:,.2f}" if pd.notna(close) else "—"
+        change = signed(move) if pd.notna(move) else "—"
+        tone = "gain" if move > 0 else "loss" if move < 0 else "flat"
+        quote.html(f'<div class="ff-heading-quote" aria-label="Quoted close {price}, session change {change}">'
+                   f'<strong>{price}</strong><span class="ff-market-delta ff-{tone}">{change}</span></div>')
+
+
+def price_and_volume(session: Session, ticker: str) -> None:
+    bars = session.inputs.bars_for(ticker).reindex(session.split.index)
+    latest = bars.loc[session.day]
+    fields = (
+        ("High", latest["split_high"]), ("Low", latest["split_low"]), ("Close", latest["split_close"]),
+    )
+    readings = [f'<div><dt>{label}</dt><dd>{f"${value:,.2f}" if pd.notna(value) else "—"}</dd></div>'
+                for label, value in fields]
+    readings.append(f'<div><dt>Volume</dt><dd>{format_volume(latest["volume"])}</dd></div>')
+    st.html(f'<dl class="ff-price-strip" aria-label="{escape(ticker)} split-adjusted prices and reported volume">'
+            f'{"".join(readings)}</dl>')
+    charts.daily_price(bars, session.dates, ticker)
+    st.caption("Prices are split-adjusted. Volume is reported shares.")
 
 
 def return_chart(session: Session, tickers: list[str]) -> None:
@@ -45,13 +83,18 @@ def return_chart(session: Session, tickers: list[str]) -> None:
 
 def stock(session: Session, ticker: str, details=None) -> None:
     fund = ticker in FUNDS
-    st.title(f"{ticker} {'fund' if fund else 'stock'} detail")
     members = session.inputs.members_on(session.day).set_index("symbol")
     sector_etf = session.inputs.sector_on(ticker, session.day)
     tickers = [ticker, sector_etf, BENCHMARK] if sector_etf else [ticker, BENCHMARK]
     split = session.split.get(ticker, pd.Series(index=session.split.index, dtype=float))
     move = calc.change(split, 1).iloc[-1]
-    performance, risk, options, research = st.tabs(["Performance", "Risk", "Options", "Research"])
+    close = session.close.loc[session.day].get(ticker, float("nan"))
+    price_heading(f"{ticker} {'fund' if fund else 'stock'} detail", SECTORS.get(sector_etf, ""), close, move)
+    price_chart, performance, risk, options, research = st.tabs(
+        ["Price & volume", "Performance", "Risk", "Options", "Research"]
+    )
+    with price_chart:
+        price_and_volume(session, ticker)
     with performance:
         return_chart(session, tickers)
         if sector_etf is None and not fund:

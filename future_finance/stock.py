@@ -9,7 +9,7 @@ from .inputs import Inputs
 from .market_calendar import capture_cutoff
 from .scope import BENCHMARK, COMPARISON, SECTORS
 
-FUNDS = {BENCHMARK, COMPARISON, "RSP", "HYG", "IEF", *SECTORS}
+FUNDS = {BENCHMARK, COMPARISON, "DIA", "IWM", "RSP", "HYG", "IEF", *SECTORS}
 
 
 def _divide(numerator: float, denominator: float) -> float:

@@ -2,24 +2,77 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-COLORS = ["#8BCBFF", "#C6AEFF", "#74DCC0"]
-REFERENCE = "#798CA8"
-GAIN = "#76D9B0"
-LOSS = "#FF9EA4"
+from .analytics import change
+
+COLORS = ["#7BD0FF", "#C6AEFF", "#68E0BA"]
+REFERENCE = "#8094AE"
+GAIN = "#45DFA4"
+LOSS = "#FA829B"
+AXIS_FONT = "JetBrains Mono, Consolas, monospace"
 
 
 def render(chart) -> None:
     st.altair_chart(chart.configure(
         background="transparent",
-        font="Segoe UI",
+        font="Inter, Segoe UI, sans-serif",
         view=alt.ViewConfig(stroke=None),
         axis=alt.AxisConfig(
-            gridColor="#304058", gridOpacity=.62, domainColor="#465770", tickColor="#465770",
-            labelColor="#B2C3D9", titleColor="#C0CFE1", labelPadding=6, titlePadding=10,
-            labelFontSize=11, titleFontSize=11, titleFontWeight="normal",
+            gridColor="#34455D", gridOpacity=.60, gridDash=[2, 4], domain=False, ticks=False,
+            labelColor="#B7C6D9", titleColor="#C9D6E8", labelPadding=7, titlePadding=10,
+            labelFont=AXIS_FONT, labelFontSize=10, titleFontSize=11, titleFontWeight="normal",
         ),
         legend=alt.LegendConfig(labelColor="#D8E6F6", titleColor="#C0CFE1", labelFontSize=12),
     ), width="stretch", theme=None)
+
+
+def daily_price(bars: pd.DataFrame, dates: pd.DatetimeIndex, ticker: str) -> None:
+    data = bars[["split_high", "split_low", "split_close", "volume"]].assign(
+        move=change(bars["split_close"], 1)
+    ).loc[dates].rename_axis("Session").reset_index()
+    show_price = data["split_close"].notna().any()
+    show_volume = data["volume"].notna().any()
+    if not show_price:
+        st.info(f"No split-adjusted closes for {ticker} in this window.")
+        if not show_volume:
+            return
+
+    date_axis = alt.Axis(format="%b %d", tickCount=5, grid=False)
+    margin = pd.Timedelta(hours=12)
+    time = alt.X("Session:T", title=None,
+                 scale=alt.Scale(type="utc", domain=[dates[0] - margin, dates[-1] + margin], nice=False))
+    price = alt.Y(field="split_close", type="quantitative", title="Price (USD)", scale=alt.Scale(zero=False),
+                  axis=alt.Axis(orient="right", minExtent=54, maxExtent=54, tickCount=5, format="$.2f"))
+    color = (alt.when(alt.datum.move > 0).then(alt.value(GAIN))
+             .when(alt.datum.move < 0).then(alt.value(LOSS)).otherwise(alt.value(REFERENCE)))
+    tooltip = [alt.Tooltip("Session:T", format="%b %d, %Y"),
+               alt.Tooltip("split_close:Q", title="Adjusted close", format="$.2f"),
+               alt.Tooltip("split_high:Q", title="Adjusted high", format="$.2f"),
+               alt.Tooltip("split_low:Q", title="Adjusted low", format="$.2f"),
+               alt.Tooltip("move:Q", title="Session change (%)", format="+.2f"),
+               alt.Tooltip("volume:Q", title="Reported shares", format=",.0f")]
+    base = alt.Chart(data).encode(x=time.axis(None if show_volume else date_axis))
+    line = base.mark_line(color=COLORS[0], strokeWidth=1.6, invalid="break-paths-show-domains",
+                          point=alt.OverlayMarkDef(size=16, filled=True)).encode(y=price, tooltip=tooltip)
+    ranges = base.mark_rule(strokeWidth=2, opacity=.7).encode(
+        y=price.field("split_low"), y2="split_high:Q", color=color, tooltip=tooltip,
+    )
+    has_range = data[["split_low", "split_high"]].notna().all(axis=1).any()
+    with st.container(key="price-plot"):
+        if show_price:
+            render((ranges + line if has_range else line).properties(height=270))
+        if show_volume:
+            volume_axis = alt.Axis(orient="right", minExtent=54, maxExtent=54, tickCount=3, format="~s")
+            volume = alt.Chart(data).mark_bar(size=4, opacity=.72).encode(
+                x=time.axis(date_axis), y=alt.Y("volume:Q", title="Volume", axis=volume_axis),
+                color=color, tooltip=tooltip,
+            ).properties(height=104)
+            render(volume)
+    with st.expander("Daily price and volume data"):
+        table = data.set_index("Session")[["split_high", "split_low", "split_close", "volume"]]
+        st.dataframe(table.sort_index(ascending=False).rename(columns={
+            "split_high": "Adjusted high", "split_low": "Adjusted low",
+            "split_close": "Adjusted close", "volume": "Reported shares",
+        }), width="stretch")
 
 
 def lines(values: pd.DataFrame, unit: str, *, height: int = 220,

@@ -5,7 +5,7 @@ from . import analytics as calc, charts
 from . import research_views
 from .scope import BENCHMARK, COMPARISON, SECTORS
 from .stress_view import market_stress
-from .views import Session, return_chart, signed
+from .views import Session, price_and_volume, price_heading, return_chart, signed
 
 
 def _breadth_chart(history: dict, dates: pd.DatetimeIndex) -> None:
@@ -106,13 +106,13 @@ def _market_leadership(session: Session, open_sector) -> None:
 
 
 def market(session: Session, open_sector, details) -> None:
-    st.title("U.S. market")
     dates = session.split.index[-max(6, len(session.dates)):]
     earlier = dates[-6] if len(dates) >= 6 else None
     members = calc.breadth_members(session.inputs, session.split, dates)
     history = calc.breadth_readings(members, dates)
     gaps = calc.moving_average_gaps(session.split[BENCHMARK])
     move = calc.change(session.split[BENCHMARK], 1).iloc[-1]
+    price_heading("U.S. market", "SPY benchmark", session.close[BENCHMARK].iloc[-1], move)
     reading = history[50][session.day]
     lead = f"SPY moved {signed(move)} on the session." if pd.notna(move) else "SPY session change is unavailable."
     if reading.percent is not None:
@@ -120,9 +120,11 @@ def market(session: Session, open_sector, details) -> None:
         lead += f" {qualifier}{reading.percent:.0f}% of eligible members are above their 50-session average."
     st.write(lead)
 
-    performance, participation, stress, internals = st.tabs(
-        ["Performance", "Participation", "Volatility & credit", "Internals"]
+    price_chart, performance, participation, stress, internals = st.tabs(
+        ["Price & volume", "Performance", "Participation", "Volatility & credit", "Internals"]
     )
+    with price_chart:
+        price_and_volume(session, BENCHMARK)
     with performance:
         return_chart(session, [BENCHMARK, COMPARISON])
     with participation:
@@ -140,25 +142,31 @@ def market(session: Session, open_sector, details) -> None:
         research_views.market(session)
 
     with details:
-        st.subheader("Trend at the close")
-        spy_trend = calc.trend(gaps)
-        st.metric("SPY trend", spy_trend)
-        st.caption(f"50-session gap {signed(gaps[50])} · 200-session gap {signed(gaps[200])}")
-        sma = session.split[BENCHMARK].rolling(200).mean()
-        st.caption(f"200-session average · {signed(calc.change(sma, 20).iloc[-1])} in 20 sessions. "
-                   "Trend uses split-adjusted closes.")
-        if COMPARISON in session.split:
-            qqq_gaps = calc.moving_average_gaps(session.split[COMPARISON])
-            qqq_trend = calc.trend(qqq_gaps)
-            st.caption(f"QQQ trend · {qqq_trend}. 50-session gap {signed(qqq_gaps[50])} · "
-                       f"200-session gap {signed(qqq_gaps[200])}.")
-            if spy_trend != qqq_trend and "Incomplete history" not in (spy_trend, qqq_trend):
-                st.caption("QQQ and SPY have different trend readings.")
+        with st.container(key="trend-evidence"):
+            _market_trend(session, gaps)
+        with st.container(key="breadth-evidence"):
+            st.subheader("Breadth over time")
+            _breadth_evidence(history, session.day, earlier)
+        with st.container(key="sector-evidence"):
+            _market_leadership(session, open_sector)
+            _sources(session)
 
-        st.subheader("Market breadth")
-        _breadth_evidence(history, session.day, earlier)
-        _market_leadership(session, open_sector)
-        _sources(session)
+
+def _market_trend(session: Session, gaps: dict[int, float]) -> None:
+    st.subheader("Trend at the close")
+    spy_trend = calc.trend(gaps)
+    st.metric("SPY trend", spy_trend)
+    st.caption(f"50-session gap {signed(gaps[50])} · 200-session gap {signed(gaps[200])}")
+    sma = session.split[BENCHMARK].rolling(200).mean()
+    st.caption(f"200-session average · {signed(calc.change(sma, 20).iloc[-1])} in 20 sessions. "
+               "Trend uses split-adjusted closes.")
+    if COMPARISON in session.split:
+        qqq_gaps = calc.moving_average_gaps(session.split[COMPARISON])
+        qqq_trend = calc.trend(qqq_gaps)
+        st.caption(f"QQQ trend · {qqq_trend}. 50-session gap {signed(qqq_gaps[50])} · "
+                   f"200-session gap {signed(qqq_gaps[200])}.")
+        if spy_trend != qqq_trend and "Incomplete history" not in (spy_trend, qqq_trend):
+            st.caption("QQQ and SPY have different trend readings.")
 
 
 def _ranking_table(ranking: pd.DataFrame) -> None:

@@ -67,6 +67,8 @@ def make_demo() -> Inputs:
         add(symbol, close)
     add("RIVN", 17.3 - 0.023 * x + 0.55 * np.cos(x / 7))
     add("CRCL", 60 + (x - x[-1] + 45) * 2.8 + 9 * np.sin(x / 2.8), "2025-06-05")
+    add("DIA", 408 + x * 0.24 + 6 * np.sin(x / 13) + 2 * np.cos(x / 4))
+    add("IWM", 208 + x * 0.06 + 7 * np.sin(x / 11) + 3 * np.cos(x / 5))
 
     membership = pd.DataFrame(
         [(date, ticker, sector) for date in dates for ticker, sector in members.items()],

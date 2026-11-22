@@ -83,13 +83,15 @@ except (OSError, ValueError, sqlite3.Error) as error:
     st.stop()
 
 with st.container(key="toolbar"):
-    brand, nav, day_control, window_control = st.columns([1.1, 2, 1, .9], vertical_alignment="center")
+    brand, nav, day_control, window_control = st.columns([1, 2, 1, .85], vertical_alignment="center")
     brand.html('<div class="ff-brand"><span aria-hidden="true" class="ff-mark"></span>FutureFinance</div>')
     with nav:
         view = st.radio("View", ["Market", "Sector", "Stock"], horizontal=True, key="view",
+                        format_func={"Market": "Market Overview", "Sector": "Sectors", "Stock": "Stock Analysis"}.get,
                         label_visibility="collapsed")
     with day_control:
-        day = st.selectbox("Session (New York)", published, format_func=lambda value: value.strftime("%b %d, %Y"))
+        day = st.selectbox("Archived session (ET)" if publications else "Session (ET)", published,
+                           format_func=lambda value: value.strftime("%b %d, %Y"), key="session_day")
     with window_control:
         window = st.selectbox("Chart window", [20, 60, 120, 252], index=1,
                               format_func=lambda value: f"{value} sessions")
@@ -101,41 +103,41 @@ if publications:
     except (OSError, ValueError, duckdb.Error, sqlite3.Error) as error:
         st.error(f"Could not read the published session. {error}")
         st.stop()
-    source = f"Archived session from {inputs.source}. Version {manifest['version']} · {manifest['vintage'].capitalize()}."
+    mode = "Archive replay"
+    source = f"{inputs.source} · Version {manifest['version']} · {manifest['vintage'].capitalize()}"
 elif inputs.demo:
-    source = "Synthetic preview"
+    mode, source = "Synthetic preview", ""
 else:
-    source = f"Local price import from {inputs.source}."
-universe = inputs.membership_source or "Membership unavailable"
-with st.container(key="sourcebar"):
-    source_col, coverage_col = st.columns([1, 1])
-    source_col.info(source)
-    coverage_col.caption(f"SPY benchmark · QQQ comparison · {universe}")
+    mode, source = "Local price import", inputs.source
 
 split = inputs.prices("split_close").loc[:day]
 total = inputs.prices("total_return_close").loc[:day]
 session = views.Session(inputs, split, total, inputs.prices("close").loc[:day],
                         pd.DatetimeIndex(split.index[-window:]), manifest)
+workspace.session_status(mode, source, inputs.membership_source)
+workspace.market_snapshot(session)
 
 with st.container(key="workspace"):
-    rail = st.container(key="watchlist-panel")
     main = st.container(key="chart-panel")
+    rail = st.container(key="left-rail")
     details = st.container(key="evidence-panel")
+    ticker = None
     with rail:
-        st.subheader("Watchlist")
-        ticker = None
-        if view == "Stock":
-            stock_choice = st.session_state.get("stock_choice")
-            options = list(dict.fromkeys(watchlist + ([stock_choice] if stock_choice else [])))
-            if options:
-                ticker = choose("Watchlist symbol", options, "stock_choice", options[0])
-        elif watchlist:
-            st.selectbox("Watchlist symbol", watchlist, index=None, placeholder="Find a symbol",
-                         key="watchlist_lookup", on_change=open_watchlist_stock)
-        if watchlist:
-            workspace.watchlist_quotes(session, watchlist, ticker)
-        else:
-            st.caption("Add symbols to watchlist.txt.")
+        workspace.sector_leadership(session)
+        with st.container(key="watchlist-panel"):
+            st.subheader("Watchlist")
+            if view == "Stock":
+                stock_choice = st.session_state.get("stock_choice")
+                options = list(dict.fromkeys(watchlist + ([stock_choice] if stock_choice else [])))
+                if options:
+                    ticker = choose("Watchlist symbol", options, "stock_choice", options[0])
+            elif watchlist:
+                st.selectbox("Watchlist symbol", watchlist, index=None, placeholder="Find a symbol",
+                             key="watchlist_lookup", on_change=open_watchlist_stock)
+            if watchlist:
+                workspace.watchlist_quotes(session, watchlist, ticker)
+            else:
+                st.caption("Add symbols to watchlist.txt.")
 
     with main:
         if view == "Market":
